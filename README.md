@@ -13,6 +13,7 @@ The repo includes:
 
 - Android library integration guide: [`docs/android-library.md`](docs/android-library.md)
 - Demo app integration example: `app/src/main/java/io/onepro/imuprobe/MainActivity.kt`
+- Latest demo APK download: [`Releases`](../../releases)
 
 ## Repo Structure
 
