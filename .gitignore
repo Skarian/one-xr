@@ -1,0 +1,8 @@
+/.gradle/
+/local.properties
+**/build/
+/artifacts/
+/ControlGlasses.apk
+**/.cxx/
+/.agent/
+AGENTS.md
