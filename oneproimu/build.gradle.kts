@@ -1,7 +1,25 @@
+import org.gradle.api.publish.maven.MavenPublication
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    `maven-publish`
 }
+
+val publishVersion = providers.gradleProperty("PUBLISH_VERSION")
+    .orElse(providers.environmentVariable("PUBLISH_VERSION"))
+    .orElse("0.1.0-SNAPSHOT")
+
+val githubPackagesRepository = providers.gradleProperty("GITHUB_PACKAGES_REPOSITORY")
+    .orElse(providers.environmentVariable("GITHUB_REPOSITORY"))
+
+val githubPackagesUsername = providers.gradleProperty("GITHUB_PACKAGES_USERNAME")
+    .orElse(providers.gradleProperty("gpr.user"))
+    .orElse(providers.environmentVariable("GITHUB_ACTOR"))
+
+val githubPackagesToken = providers.gradleProperty("GITHUB_PACKAGES_TOKEN")
+    .orElse(providers.gradleProperty("gpr.key"))
+    .orElse(providers.environmentVariable("GITHUB_TOKEN"))
 
 android {
     namespace = "io.onepro.imu"
@@ -27,6 +45,54 @@ android {
         }
     }
 
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
+}
+
+publishing {
+    publications {
+        register<MavenPublication>("release") {
+            groupId = "io.onepro"
+            artifactId = "oneproimu"
+            version = publishVersion.get()
+
+            afterEvaluate {
+                from(components["release"])
+            }
+
+            pom {
+                name.set("oneproimu")
+                description.set("Android library for XREAL One Pro IMU streaming and head tracking")
+                url.set(
+                    "https://github.com/${
+                        githubPackagesRepository.orElse("UNCONFIRMED/UNCONFIRMED").get()
+                    }"
+                )
+                licenses {
+                    license {
+                        name.set("MIT License")
+                        url.set("https://opensource.org/license/mit")
+                    }
+                }
+            }
+        }
+    }
+
+    repositories {
+        if (githubPackagesRepository.isPresent) {
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/${githubPackagesRepository.get()}")
+                credentials {
+                    username = githubPackagesUsername.orNull
+                    password = githubPackagesToken.orNull
+                }
+            }
+        }
+    }
 }
 
 dependencies {

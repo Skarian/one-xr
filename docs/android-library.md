@@ -25,9 +25,13 @@ This guide is for Android developers who want live XREAL One Pro head tracking w
 - XREAL One Pro connected and reachable from the phone
 - Glasses mode set to `Follow` (stabilization off) for expected behavior
 
-## Add the library module
+## Add the library to your app
 
-Today this repo ships as a source module, so pull `oneproimu/` into your project and wire it as a local module
+For most users, source-module integration is the fastest path
+
+### Source module (recommended)
+
+Pull `oneproimu/` into your project and wire it as a local module
 
 `settings.gradle.kts`:
 
@@ -42,6 +46,48 @@ dependencies {
     implementation(project(":oneproimu"))
 }
 ```
+
+### Optional: Maven artifact
+
+If you want package-based integration, this repo also publishes
+`io.onepro:oneproimu` to GitHub Packages
+
+1. Add credentials to `~/.gradle/gradle.properties`
+
+```properties
+gpr.user=YOUR_GITHUB_USERNAME
+gpr.key=YOUR_GITHUB_READ_PACKAGES_TOKEN
+```
+
+2. Add the package repository in your project `settings.gradle.kts`
+
+```kotlin
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven {
+            url = uri("https://maven.pkg.github.com/nskaria/one-pro-imu")
+            credentials {
+                username = providers.gradleProperty("gpr.user").orNull
+                password = providers.gradleProperty("gpr.key").orNull
+            }
+        }
+    }
+}
+```
+
+3. Add the dependency in `app/build.gradle.kts`
+
+```kotlin
+dependencies {
+    implementation("io.onepro:oneproimu:<version>")
+}
+```
+
+Use a GitHub token with `read:packages` scope for consumption from local
+machines or other repositories
 
 ## Required permissions
 
