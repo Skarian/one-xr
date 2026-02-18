@@ -8,20 +8,16 @@ import org.junit.Test
 
 class OneProHeadTrackerTest {
     @Test
-    fun calibrationCompletesAndComputesGyroBias() {
-        val tracker = OneProHeadTracker(
-            config = OneProHeadTrackerConfig(
-                calibrationSampleTarget = 3,
-                complementaryFilterAlpha = 0.96f,
-                pitchScale = 1.0f,
-                yawScale = 1.0f,
-                rollScale = 1.0f
-            )
+    fun calibrationCompletesAndComputesGyroResidualBias() {
+        val tracker = createTracker(
+            calibrationSampleTarget = 3,
+            complementaryFilterAlpha = 0.96f,
+            biasConfig = neutralBiasConfig()
         )
 
-        val s1 = tracker.calibrateGyroscope(OneProImuVectorSample(1.0f, 2.0f, -1.0f, 0.0f, 0.0f, 1.0f))
-        val s2 = tracker.calibrateGyroscope(OneProImuVectorSample(2.0f, 2.0f, -1.0f, 0.0f, 0.0f, 1.0f))
-        val s3 = tracker.calibrateGyroscope(OneProImuVectorSample(3.0f, 2.0f, -1.0f, 0.0f, 0.0f, 1.0f))
+        val s1 = tracker.calibrateGyroscope(sample(gx = 1.0f, gy = 2.0f, gz = -1.0f))
+        val s2 = tracker.calibrateGyroscope(sample(gx = 2.0f, gy = 2.0f, gz = -1.0f))
+        val s3 = tracker.calibrateGyroscope(sample(gx = 3.0f, gy = 2.0f, gz = -1.0f))
 
         assertFalse(s1.isCalibrated)
         assertFalse(s2.isCalibrated)
@@ -33,26 +29,22 @@ class OneProHeadTrackerTest {
 
     @Test
     fun zeroViewProducesRelativeOrientationAroundCurrentPose() {
-        val tracker = OneProHeadTracker(
-            config = OneProHeadTrackerConfig(
-                calibrationSampleTarget = 1,
-                complementaryFilterAlpha = 1.0f,
-                pitchScale = 1.0f,
-                yawScale = 1.0f,
-                rollScale = 1.0f
-            )
+        val tracker = createTracker(
+            calibrationSampleTarget = 1,
+            complementaryFilterAlpha = 1.0f,
+            biasConfig = neutralBiasConfig()
         )
 
-        tracker.calibrateGyroscope(OneProImuVectorSample(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f))
+        tracker.calibrateGyroscope(sample())
 
         val firstUpdate = tracker.update(
-            sensorSample = OneProImuVectorSample(0.0f, 90.0f, 0.0f, 0.0f, 0.0f, 1.0f),
+            sensorSample = sample(gy = 90.0f),
             deviceTimestampNanos = 1_000_000_000UL
         )
         assertNull(firstUpdate)
 
         val secondUpdate = tracker.update(
-            sensorSample = OneProImuVectorSample(0.0f, 90.0f, 0.0f, 0.0f, 0.0f, 1.0f),
+            sensorSample = sample(gy = 90.0f),
             deviceTimestampNanos = 1_100_000_000UL
         )
         assertTrue(secondUpdate != null)
@@ -63,7 +55,7 @@ class OneProHeadTrackerTest {
         assertEquals(0.0f, zeroed.yaw, 0.0001f)
 
         tracker.update(
-            sensorSample = OneProImuVectorSample(0.0f, 90.0f, 0.0f, 0.0f, 0.0f, 1.0f),
+            sensorSample = sample(gy = 90.0f),
             deviceTimestampNanos = 1_200_000_000UL
         )
         val relativeAfter = tracker.getRelativeOrientation()
@@ -72,25 +64,21 @@ class OneProHeadTrackerTest {
 
     @Test
     fun updateFailsFastWhenDeviceTimestampIsNonMonotonic() {
-        val tracker = OneProHeadTracker(
-            config = OneProHeadTrackerConfig(
-                calibrationSampleTarget = 1,
-                complementaryFilterAlpha = 1.0f,
-                pitchScale = 1.0f,
-                yawScale = 1.0f,
-                rollScale = 1.0f
-            )
+        val tracker = createTracker(
+            calibrationSampleTarget = 1,
+            complementaryFilterAlpha = 1.0f,
+            biasConfig = neutralBiasConfig()
         )
 
-        tracker.calibrateGyroscope(OneProImuVectorSample(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f))
+        tracker.calibrateGyroscope(sample())
         tracker.update(
-            sensorSample = OneProImuVectorSample(0.0f, 90.0f, 0.0f, 0.0f, 0.0f, 1.0f),
+            sensorSample = sample(gy = 90.0f),
             deviceTimestampNanos = 1_000_000_000UL
         )
 
         try {
             tracker.update(
-                sensorSample = OneProImuVectorSample(0.0f, 90.0f, 0.0f, 0.0f, 0.0f, 1.0f),
+                sensorSample = sample(gy = 90.0f),
                 deviceTimestampNanos = 1_000_000_000UL
             )
             throw AssertionError("expected non-monotonic timestamp failure")
@@ -101,18 +89,14 @@ class OneProHeadTrackerTest {
 
     @Test
     fun resetCalibrationClearsState() {
-        val tracker = OneProHeadTracker(
-            config = OneProHeadTrackerConfig(
-                calibrationSampleTarget = 2,
-                complementaryFilterAlpha = 0.96f,
-                pitchScale = 1.0f,
-                yawScale = 1.0f,
-                rollScale = 1.0f
-            )
+        val tracker = createTracker(
+            calibrationSampleTarget = 2,
+            complementaryFilterAlpha = 0.96f,
+            biasConfig = neutralBiasConfig()
         )
 
-        tracker.calibrateGyroscope(OneProImuVectorSample(1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f))
-        tracker.calibrateGyroscope(OneProImuVectorSample(1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f))
+        tracker.calibrateGyroscope(sample(gx = 1.0f, gy = 1.0f, gz = 1.0f))
+        tracker.calibrateGyroscope(sample(gx = 1.0f, gy = 1.0f, gz = 1.0f))
         assertTrue(tracker.isCalibrated)
 
         tracker.resetCalibration()
@@ -122,5 +106,168 @@ class OneProHeadTrackerTest {
         assertEquals(0.0f, tracker.gyroBiasX, 0.0001f)
         assertEquals(0.0f, tracker.gyroBiasY, 0.0001f)
         assertEquals(0.0f, tracker.gyroBiasZ, 0.0001f)
+    }
+
+    @Test
+    fun calibrationSubtractsFactoryGyroBiasBeforeResidualEstimation() {
+        val tracker = createTracker(
+            calibrationSampleTarget = 3,
+            complementaryFilterAlpha = 1.0f,
+            biasConfig = biasConfig(
+                accelBias = XrVector3d(0.0, 0.0, 0.0),
+                gyroPoints = listOf(
+                    XrGyroBiasSample(
+                        bias = XrVector3d(1.0, 2.0, -1.0),
+                        temperatureCelsius = 25.0
+                    )
+                )
+            )
+        )
+
+        tracker.calibrateGyroscope(sample(gx = 2.0f, gy = 4.0f, gz = -2.0f, temperatureCelsius = 25.0f))
+        tracker.calibrateGyroscope(sample(gx = 2.0f, gy = 4.0f, gz = -2.0f, temperatureCelsius = 25.0f))
+        tracker.calibrateGyroscope(sample(gx = 2.0f, gy = 4.0f, gz = -2.0f, temperatureCelsius = 25.0f))
+
+        assertEquals(1.0f, tracker.gyroBiasX, 0.0001f)
+        assertEquals(2.0f, tracker.gyroBiasY, 0.0001f)
+        assertEquals(-1.0f, tracker.gyroBiasZ, 0.0001f)
+    }
+
+    @Test
+    fun updateSubtractsFactoryAccelBiasBeforeComplementaryFilter() {
+        val tracker = createTracker(
+            calibrationSampleTarget = 1,
+            complementaryFilterAlpha = 0.0f,
+            biasConfig = biasConfig(
+                accelBias = XrVector3d(0.2, -0.1, 0.3),
+                gyroPoints = listOf(
+                    XrGyroBiasSample(
+                        bias = XrVector3d(0.0, 0.0, 0.0),
+                        temperatureCelsius = 20.0
+                    )
+                )
+            )
+        )
+
+        tracker.calibrateGyroscope(sample(temperatureCelsius = 20.0f))
+        tracker.update(
+            sensorSample = sample(
+                ax = 0.2f,
+                ay = -0.1f,
+                az = 1.3f,
+                temperatureCelsius = 20.0f
+            ),
+            deviceTimestampNanos = 1_000_000_000UL
+        )
+        val update = tracker.update(
+            sensorSample = sample(
+                ax = 0.2f,
+                ay = -0.1f,
+                az = 1.3f,
+                temperatureCelsius = 20.0f
+            ),
+            deviceTimestampNanos = 1_100_000_000UL
+        )
+
+        assertTrue(update != null)
+        assertEquals(0.0f, update!!.absoluteOrientation.pitch, 0.0001f)
+        assertEquals(0.0f, update.absoluteOrientation.roll, 0.0001f)
+    }
+
+    @Test
+    fun updateUsesInterpolatedFactoryGyroBiasByTemperature() {
+        val tracker = createTracker(
+            calibrationSampleTarget = 1,
+            complementaryFilterAlpha = 1.0f,
+            biasConfig = biasConfig(
+                accelBias = XrVector3d(0.0, 0.0, 0.0),
+                gyroPoints = listOf(
+                    XrGyroBiasSample(
+                        bias = XrVector3d(0.0, 0.0, 0.0),
+                        temperatureCelsius = 0.0
+                    ),
+                    XrGyroBiasSample(
+                        bias = XrVector3d(10.0, 0.0, 0.0),
+                        temperatureCelsius = 10.0
+                    )
+                )
+            )
+        )
+
+        tracker.calibrateGyroscope(sample(gx = 5.0f, temperatureCelsius = 5.0f))
+        tracker.update(
+            sensorSample = sample(gx = 5.0f, temperatureCelsius = 5.0f),
+            deviceTimestampNanos = 1_000_000_000UL
+        )
+        val update = tracker.update(
+            sensorSample = sample(gx = 5.0f, temperatureCelsius = 5.0f),
+            deviceTimestampNanos = 1_100_000_000UL
+        )
+
+        assertTrue(update != null)
+        assertEquals(0.0f, update!!.absoluteOrientation.pitch, 0.0001f)
+    }
+
+    private fun createTracker(
+        calibrationSampleTarget: Int,
+        complementaryFilterAlpha: Float,
+        biasConfig: OneProTrackerBiasConfig
+    ): OneProHeadTracker {
+        return OneProHeadTracker(
+            config = OneProHeadTrackerConfig(
+                calibrationSampleTarget = calibrationSampleTarget,
+                complementaryFilterAlpha = complementaryFilterAlpha,
+                pitchScale = 1.0f,
+                yawScale = 1.0f,
+                rollScale = 1.0f,
+                biasConfig = biasConfig
+            )
+        )
+    }
+
+    private fun sample(
+        gx: Float = 0.0f,
+        gy: Float = 0.0f,
+        gz: Float = 0.0f,
+        ax: Float = 0.0f,
+        ay: Float = 0.0f,
+        az: Float = 1.0f,
+        temperatureCelsius: Float = 25.0f
+    ): OneProImuVectorSample {
+        return OneProImuVectorSample(
+            gx = gx,
+            gy = gy,
+            gz = gz,
+            ax = ax,
+            ay = ay,
+            az = az,
+            temperatureCelsius = temperatureCelsius
+        )
+    }
+
+    private fun neutralBiasConfig(): OneProTrackerBiasConfig {
+        return biasConfig(
+            accelBias = XrVector3d(0.0, 0.0, 0.0),
+            gyroPoints = listOf(
+                XrGyroBiasSample(
+                    bias = XrVector3d(0.0, 0.0, 0.0),
+                    temperatureCelsius = 25.0
+                )
+            )
+        )
+    }
+
+    private fun biasConfig(
+        accelBias: XrVector3d,
+        gyroPoints: List<XrGyroBiasSample>
+    ): OneProTrackerBiasConfig {
+        return OneProTrackerBiasConfig(
+            accelBias = Vector3f(
+                accelBias.x.toFloat(),
+                accelBias.y.toFloat(),
+                accelBias.z.toFloat()
+            ),
+            gyroBiasTemperatureData = gyroPoints
+        )
     }
 }

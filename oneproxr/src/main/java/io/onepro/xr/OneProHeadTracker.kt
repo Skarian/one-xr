@@ -9,15 +9,54 @@ internal data class OneProImuVectorSample(
     val gz: Float,
     val ax: Float,
     val ay: Float,
-    val az: Float
+    val az: Float,
+    val temperatureCelsius: Float
 )
+
+internal data class OneProTrackerBiasConfig(
+    val accelBias: Vector3f,
+    val gyroBiasTemperatureData: List<XrGyroBiasSample>
+) {
+    init {
+        require(gyroBiasTemperatureData.isNotEmpty()) {
+            "gyroBiasTemperatureData must not be empty"
+        }
+    }
+
+    fun interpolateGyroBias(temperatureCelsius: Float): Vector3f {
+        val insertionIndex = gyroBiasTemperatureData.indexOfFirst {
+            temperatureCelsius.toDouble() < it.temperatureCelsius
+        }.let { if (it == -1) gyroBiasTemperatureData.size else it }
+        if (insertionIndex == 0) {
+            return gyroBiasTemperatureData.first().bias.toVector3f()
+        }
+        if (insertionIndex == gyroBiasTemperatureData.size) {
+            return gyroBiasTemperatureData.last().bias.toVector3f()
+        }
+
+        val previous = gyroBiasTemperatureData[insertionIndex - 1]
+        val next = gyroBiasTemperatureData[insertionIndex]
+        val denominator = next.temperatureCelsius - previous.temperatureCelsius
+        if (denominator == 0.0) {
+            return previous.bias.toVector3f()
+        }
+        val fraction = ((temperatureCelsius.toDouble() - previous.temperatureCelsius) / denominator).toFloat()
+        val keep = 1.0f - fraction
+        return Vector3f(
+            x = previous.bias.x.toFloat() * keep + next.bias.x.toFloat() * fraction,
+            y = previous.bias.y.toFloat() * keep + next.bias.y.toFloat() * fraction,
+            z = previous.bias.z.toFloat() * keep + next.bias.z.toFloat() * fraction
+        )
+    }
+}
 
 internal data class OneProHeadTrackerConfig(
     val calibrationSampleTarget: Int,
     val complementaryFilterAlpha: Float,
     val pitchScale: Float,
     val yawScale: Float,
-    val rollScale: Float
+    val rollScale: Float,
+    val biasConfig: OneProTrackerBiasConfig
 )
 
 internal data class OneProCalibrationState(
@@ -32,7 +71,10 @@ internal data class OneProCalibrationState(
 internal data class OneProTrackingUpdate(
     val deltaTimeSeconds: Float,
     val absoluteOrientation: HeadOrientationDegrees,
-    val relativeOrientation: HeadOrientationDegrees
+    val relativeOrientation: HeadOrientationDegrees,
+    val factoryGyroBias: Vector3f,
+    val runtimeResidualGyroBias: Vector3f,
+    val factoryAccelBias: Vector3f
 )
 
 internal class OneProHeadTracker(
@@ -72,9 +114,10 @@ internal class OneProHeadTracker(
             return calibrationState()
         }
 
-        gyroSumX += sensorSample.gx
-        gyroSumY += sensorSample.gy
-        gyroSumZ += sensorSample.gz
+        val factoryGyroBias = config.biasConfig.interpolateGyroBias(sensorSample.temperatureCelsius)
+        gyroSumX += sensorSample.gx - factoryGyroBias.x
+        gyroSumY += sensorSample.gy - factoryGyroBias.y
+        gyroSumZ += sensorSample.gz - factoryGyroBias.z
         calibrationCount += 1
 
         if (calibrationCount >= config.calibrationSampleTarget) {
@@ -151,29 +194,36 @@ internal class OneProHeadTracker(
             currentTimestampNanos = deviceTimestampNanos
         )
 
-        val gyroX = sensorSample.gx - gyroBiasX
-        val gyroY = sensorSample.gy - gyroBiasY
-        val gyroZ = sensorSample.gz - gyroBiasZ
+        val factoryGyroBias = config.biasConfig.interpolateGyroBias(sensorSample.temperatureCelsius)
+        val factoryAccelBias = config.biasConfig.accelBias
+
+        val gyroX = sensorSample.gx - factoryGyroBias.x - gyroBiasX
+        val gyroY = sensorSample.gy - factoryGyroBias.y - gyroBiasY
+        val gyroZ = sensorSample.gz - factoryGyroBias.z - gyroBiasZ
 
         val pitchGyro = pitch + gyroX * deltaTimeSeconds
         val yawGyro = yaw + gyroY * deltaTimeSeconds
         val rollGyro = roll + gyroZ * deltaTimeSeconds
 
+        val accelX = sensorSample.ax - factoryAccelBias.x
+        val accelY = sensorSample.ay - factoryAccelBias.y
+        val accelZ = sensorSample.az - factoryAccelBias.z
+
         val accMagnitude = sqrt(
-            sensorSample.ax * sensorSample.ax +
-                sensorSample.ay * sensorSample.ay +
-                sensorSample.az * sensorSample.az
+            accelX * accelX +
+                accelY * accelY +
+                accelZ * accelZ
         )
 
         if (accMagnitude > 0.01f) {
             val pitchAccel = Math.toDegrees(
                 atan2(
-                    -sensorSample.ax.toDouble(),
-                    sqrt((sensorSample.ay * sensorSample.ay + sensorSample.az * sensorSample.az).toDouble())
+                    -accelX.toDouble(),
+                    sqrt((accelY * accelY + accelZ * accelZ).toDouble())
                 )
             ).toFloat()
             val rollAccel = Math.toDegrees(
-                atan2(sensorSample.ay.toDouble(), sensorSample.az.toDouble())
+                atan2(accelY.toDouble(), accelZ.toDouble())
             ).toFloat()
             val alpha = config.complementaryFilterAlpha
             pitch = alpha * pitchGyro + (1.0f - alpha) * pitchAccel
@@ -198,7 +248,10 @@ internal class OneProHeadTracker(
         return OneProTrackingUpdate(
             deltaTimeSeconds = deltaTimeSeconds,
             absoluteOrientation = absolute,
-            relativeOrientation = getRelativeOrientation()
+            relativeOrientation = getRelativeOrientation(),
+            factoryGyroBias = factoryGyroBias,
+            runtimeResidualGyroBias = Vector3f(gyroBiasX, gyroBiasY, gyroBiasZ),
+            factoryAccelBias = factoryAccelBias
         )
     }
 
@@ -231,4 +284,8 @@ internal class OneProHeadTracker(
         }
         return deltaSeconds.toFloat()
     }
+}
+
+private fun XrVector3d.toVector3f(): Vector3f {
+    return Vector3f(x.toFloat(), y.toFloat(), z.toFloat())
 }

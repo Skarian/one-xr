@@ -5,8 +5,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import androidx.annotation.RequiresPermission
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import java.util.Collections
@@ -45,19 +43,29 @@ class OneProXrClient(
         val addresses: List<String>
     )
 
+    private data class RuntimeHandles(
+        val streamJob: Job?,
+        val controlSession: XrControlSession?,
+        val controlEventJob: Job?
+    )
+
     private val clientScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val runtimeMutex = Mutex()
     private var streamJob: Job? = null
     private var activeConnectionInfo: XrConnectionInfo? = null
     private var activeControlChannel: HeadTrackingControlChannel? = null
+    private var activeControlSession: XrControlSession? = null
+    private var activeControlEventJob: Job? = null
     private var latestImuSample: XrImuSample? = null
     private var latestMagSample: XrMagSample? = null
 
     private val _sessionState = MutableStateFlow<XrSessionState>(XrSessionState.Idle)
+    private val _biasState = MutableStateFlow<XrBiasState>(XrBiasState.Inactive)
     private val _sensorData = MutableStateFlow<XrSensorSnapshot?>(null)
     private val _poseData = MutableStateFlow<XrPoseSnapshot?>(null)
     private val _advancedDiagnostics = MutableStateFlow<HeadTrackingStreamDiagnostics?>(null)
     private val _advancedReports = MutableSharedFlow<OneProReportMessage>(extraBufferCapacity = 256)
+    private val _advancedControlEvents = MutableSharedFlow<XrControlEvent>(extraBufferCapacity = 128)
 
     private val advancedApi = object : OneProXrAdvancedApi {
         override val diagnostics: StateFlow<HeadTrackingStreamDiagnostics?>
@@ -65,10 +73,19 @@ class OneProXrClient(
 
         override val reports: SharedFlow<OneProReportMessage>
             get() = _advancedReports.asSharedFlow()
+
+        override val controlEvents: SharedFlow<XrControlEvent>
+            get() = _advancedControlEvents.asSharedFlow()
     }
 
     val sessionState: StateFlow<XrSessionState>
         get() = _sessionState.asStateFlow()
+
+    /**
+     * Emits bias activation transitions for tracker correction (`Inactive`, `LoadingConfig`, `Active`, `Error`).
+     */
+    val biasState: StateFlow<XrBiasState>
+        get() = _biasState.asStateFlow()
 
     val sensorData: StateFlow<XrSensorSnapshot?>
         get() = _sensorData.asStateFlow()
@@ -101,19 +118,31 @@ class OneProXrClient(
 
     @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
     suspend fun start(): XrConnectionInfo {
-        runtimeMutex.withLock {
+        val staleControlHandles = runtimeMutex.withLock {
             if (streamJob?.isActive == true) {
                 return activeConnectionInfo ?: throw IllegalStateException("XR session is already starting")
             }
             activeConnectionInfo = null
             activeControlChannel = null
+            val previousControlSession = activeControlSession
+            activeControlSession = null
+            val previousControlEventJob = activeControlEventJob
+            activeControlEventJob = null
             latestImuSample = null
             latestMagSample = null
             _sensorData.value = null
             _poseData.value = null
             _advancedDiagnostics.value = null
             _sessionState.value = XrSessionState.Connecting
+            _biasState.value = XrBiasState.LoadingConfig
+            RuntimeHandles(
+                streamJob = null,
+                controlSession = previousControlSession,
+                controlEventJob = previousControlEventJob
+            )
         }
+        staleControlHandles.controlEventJob?.cancel()
+        staleControlHandles.controlSession?.close()
 
         val startupSignal = CompletableDeferred<XrConnectionInfo>()
         val controlChannel = HeadTrackingControlChannel()
@@ -156,13 +185,13 @@ class OneProXrClient(
                 message = "Timed out waiting for first valid report during startup",
                 startupSignal = startupSignal
             )
-            cancelRuntimeSession(awaitTermination = true)
+            cancelRuntimeSession(awaitTermination = true, resetBiasState = true)
             throw IllegalStateException("Timed out waiting for first valid report during startup")
         }
     }
 
     suspend fun stop() {
-        cancelRuntimeSession(awaitTermination = true)
+        cancelRuntimeSession(awaitTermination = true, resetBiasState = true)
         _sessionState.value = XrSessionState.Stopped
     }
 
@@ -189,44 +218,109 @@ class OneProXrClient(
         control.requestRecalibration()
     }
 
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
     suspend fun setSceneMode(mode: XrSceneMode) {
-        throw UnsupportedOperationException("setSceneMode is not available until Phase 2 control parity")
+        sendSetNumericControlCommand(
+            magic = XrControlMagic.SET_SCENE_MODE,
+            value = mode.wireValue
+        )
     }
 
-    suspend fun setInputMode(mode: XrInputMode) {
-        throw UnsupportedOperationException("setInputMode is not available until Phase 2 control parity")
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun setDisplayInputMode(mode: XrDisplayInputMode) {
+        sendSetNumericControlCommand(
+            magic = XrControlMagic.SET_DISPLAY_INPUT_MODE,
+            value = mode.wireValue
+        )
     }
 
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
     suspend fun setBrightness(level: Int) {
-        throw UnsupportedOperationException("setBrightness is not available until Phase 2 control parity")
+        if (level !in 0..9) {
+            throw XrControlProtocolException(
+                code = XrControlProtocolErrorCode.INVALID_ARGUMENT,
+                message = "Brightness level must be in range 0..9"
+            )
+        }
+        sendSetNumericControlCommand(
+            magic = XrControlMagic.SET_BRIGHTNESS,
+            value = level
+        )
     }
 
-    suspend fun setDimmer(level: Int) {
-        throw UnsupportedOperationException("setDimmer is not available until Phase 2 control parity")
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun setDimmer(level: XrDimmerLevel) {
+        sendSetNumericControlCommand(
+            magic = XrControlMagic.SET_DIMMER,
+            value = level.wireValue
+        )
     }
 
-    suspend fun getDisplayConfiguration(): XrDisplayConfiguration {
-        throw UnsupportedOperationException("getDisplayConfiguration is not available until Phase 2 control parity")
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun getId(): String {
+        val payload = sendGetPropertyControlCommand(XrControlMagic.GET_ID)
+        return XrControlPropertyWire.parseStringPropertyResponse(payload)
     }
 
-    suspend fun setDisplayConfiguration(config: XrDisplayConfiguration) {
-        throw UnsupportedOperationException("setDisplayConfiguration is not available until Phase 2 control parity")
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun getSoftwareVersion(): String {
+        val payload = sendGetPropertyControlCommand(XrControlMagic.GET_SOFTWARE_VERSION)
+        return XrControlPropertyWire.parseStringPropertyResponse(payload)
     }
 
-    private suspend fun cancelRuntimeSession(awaitTermination: Boolean = false) {
-        val jobToCancel = runtimeMutex.withLock {
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun getDspVersion(): String {
+        val payload = sendGetPropertyControlCommand(XrControlMagic.GET_DSP_VERSION)
+        return XrControlPropertyWire.parseStringPropertyResponse(payload)
+    }
+
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun getConfigRaw(): String {
+        val payload = sendGetPropertyControlCommand(XrControlMagic.GET_CONFIG)
+        return XrControlPropertyWire.parseStringPropertyResponse(payload)
+    }
+
+    /**
+     * Loads and validates the typed device config from the control-channel JSON payload.
+     *
+     * Throws [XrControlProtocolException] for transport/protocol errors and
+     * [XrDeviceConfigException] for parse/schema validation failures.
+     */
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    suspend fun getConfig(): XrDeviceConfig {
+        return XrDeviceConfigParser.parse(getConfigRaw())
+    }
+
+    private suspend fun cancelRuntimeSession(
+        awaitTermination: Boolean = false,
+        resetBiasState: Boolean = false
+    ) {
+        val handles = runtimeMutex.withLock {
             val active = streamJob
             streamJob = null
             activeConnectionInfo = null
             activeControlChannel = null
+            val controlSession = activeControlSession
+            activeControlSession = null
+            val controlEventJob = activeControlEventJob
+            activeControlEventJob = null
             latestImuSample = null
             latestMagSample = null
-            active
+            RuntimeHandles(
+                streamJob = active,
+                controlSession = controlSession,
+                controlEventJob = controlEventJob
+            )
         }
+        handles.controlEventJob?.cancel()
+        handles.controlSession?.close()
         if (awaitTermination) {
-            jobToCancel?.cancelAndJoin()
+            handles.streamJob?.cancelAndJoin()
         } else {
-            jobToCancel?.cancel()
+            handles.streamJob?.cancel()
+        }
+        if (resetBiasState) {
+            _biasState.value = XrBiasState.Inactive
         }
     }
 
@@ -235,6 +329,10 @@ class OneProXrClient(
         startupSignal: CompletableDeferred<XrConnectionInfo>
     ) {
         when (event) {
+            is HeadTrackingStreamEvent.BiasStateChanged -> {
+                _biasState.value = event.state
+            }
+
             is HeadTrackingStreamEvent.Connected -> {
                 val info = XrConnectionInfo(
                     networkHandle = event.networkHandle,
@@ -325,7 +423,10 @@ class OneProXrClient(
                     calibrationSampleCount = event.sample.calibrationSampleCount,
                     calibrationTarget = event.sample.calibrationTarget,
                     deltaTimeSeconds = event.sample.deltaTimeSeconds,
-                    sourceDeviceTimeNs = event.sample.sourceDeviceTimeNs
+                    sourceDeviceTimeNs = event.sample.sourceDeviceTimeNs,
+                    factoryGyroBias = event.sample.factoryGyroBias,
+                    runtimeResidualGyroBias = event.sample.runtimeResidualGyroBias,
+                    factoryAccelBias = event.sample.factoryAccelBias
                 )
                 val info = runtimeMutex.withLock { activeConnectionInfo }
                 if (info != null && event.sample.isCalibrated) {
@@ -343,7 +444,7 @@ class OneProXrClient(
                         IllegalStateException("Stream stopped before startup completed: ${event.reason}")
                     )
                 }
-                cancelRuntimeSession()
+                cancelRuntimeSession(resetBiasState = true)
                 _sessionState.value = XrSessionState.Stopped
             }
 
@@ -353,7 +454,7 @@ class OneProXrClient(
                     message = event.error,
                     startupSignal = startupSignal
                 )
-                cancelRuntimeSession()
+                cancelRuntimeSession(resetBiasState = false)
             }
         }
     }
@@ -375,339 +476,155 @@ class OneProXrClient(
     }
 
     @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
-    suspend fun connectControlChannel(
-        connectTimeoutMs: Int = 1500,
-        readTimeoutMs: Int = 400
-    ): ControlChannelResult = withContext(Dispatchers.IO) {
-        val candidates = networkCandidatesForHost(endpoint.host)
-        val selected = preferredNetwork(endpoint.host, candidates)
-        if (selected == null) {
-            return@withContext ControlChannelResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                readSummary = "not-run",
-                error = "No matching Android Network candidate for host ${endpoint.host}"
-            )
-        }
-
-        val startNanos = System.nanoTime()
-        return@withContext try {
-            selected.network.socketFactory.createSocket().use { socket ->
-                socket.soTimeout = readTimeoutMs
-                socket.connect(java.net.InetSocketAddress(endpoint.host, endpoint.controlPort), connectTimeoutMs)
-                val connectMs = (System.nanoTime() - startNanos) / 1_000_000
-                val localSocket = "${socket.localAddress.hostAddress}:${socket.localPort}"
-                val remoteSocket = "${socket.inetAddress.hostAddress}:${socket.port}"
-                val readSummary = readSummary(socket.getInputStream(), 32)
-                ControlChannelResult(
-                    success = true,
-                    networkHandle = selected.network.networkHandle,
-                    interfaceName = selected.interfaceName,
-                    localSocket = localSocket,
-                    remoteSocket = remoteSocket,
-                    connectMs = connectMs,
-                    readSummary = readSummary,
-                    error = null
-                )
-            }
-        } catch (t: Throwable) {
-            val connectMs = (System.nanoTime() - startNanos) / 1_000_000
-            ControlChannelResult(
-                success = false,
-                networkHandle = selected.network.networkHandle,
-                interfaceName = selected.interfaceName,
-                localSocket = null,
-                remoteSocket = "${endpoint.host}:${endpoint.controlPort}",
-                connectMs = connectMs,
-                readSummary = "not-run",
-                error = "${t.javaClass.simpleName}:${t.message ?: "no-message"}"
-            )
-        }
+    private suspend fun sendSetNumericControlCommand(
+        magic: Int,
+        value: Int
+    ) {
+        val request = XrControlPropertyWire.encodeSetNumericPropertyRequest(value)
+        val response = sendControlTransaction(
+            magic = magic,
+            requestBody = request
+        )
+        XrControlPropertyWire.parseEmptyPropertyResponse(response)
     }
 
     @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
-    suspend fun readSensorFrames(
-        frameCount: Int = 4,
-        frameSizeBytes: Int = 32,
-        connectTimeoutMs: Int = 1500,
-        readTimeoutMs: Int = 700,
-        maxReadBytes: Int = 256,
-        syncMarker: ByteArray = byteArrayOf(0x28, 0x36)
-    ): StreamReadResult = withContext(Dispatchers.IO) {
-        if (frameSizeBytes <= 0) {
-            return@withContext StreamReadResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                frames = emptyList(),
-                rateEstimate = null,
-                readStatus = "not-run",
-                error = "frameSizeBytes must be > 0"
-            )
-        }
-        val candidates = networkCandidatesForHost(endpoint.host)
-        val selected = preferredNetwork(endpoint.host, candidates)
-        if (selected == null) {
-            return@withContext StreamReadResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                frames = emptyList(),
-                rateEstimate = null,
-                readStatus = "not-run",
-                error = "No matching Android Network candidate for host ${endpoint.host}"
-            )
-        }
+    private suspend fun sendGetPropertyControlCommand(magic: Int): ByteArray {
+        return sendControlTransaction(
+            magic = magic,
+            requestBody = XrControlPropertyWire.encodeGetPropertyRequest()
+        )
+    }
 
-        val startNanos = System.nanoTime()
-        return@withContext try {
-            selected.network.socketFactory.createSocket().use { socket ->
-                socket.soTimeout = readTimeoutMs
-                socket.connect(java.net.InetSocketAddress(endpoint.host, endpoint.streamPort), connectTimeoutMs)
-                val connectMs = (System.nanoTime() - startNanos) / 1_000_000
-                val localSocket = "${socket.localAddress.hostAddress}:${socket.localPort}"
-                val remoteSocket = "${socket.inetAddress.hostAddress}:${socket.port}"
-                val frames = mutableListOf<DecodedSensorFrame>()
-                val captureStartNanos = System.nanoTime()
-                var pending = ByteArray(0)
-                var readStatus = "completed"
-                while (frames.size < frameCount) {
-                    val payload = try {
-                        readFrame(socket.getInputStream(), maxReadBytes)
-                    } catch (_: SocketTimeoutException) {
-                        readStatus = "timeout"
-                        null
-                    }
-                    if (payload == null) {
-                        if (readStatus == "completed") {
-                            readStatus = "eof"
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    private suspend fun sendControlTransaction(
+        magic: Int,
+        requestBody: ByteArray,
+        connectTimeoutMs: Int = 1500,
+        requestTimeoutMs: Long = 1200L
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val session = getOrCreateControlSession(
+            connectTimeoutMs = connectTimeoutMs,
+            requestTimeoutMs = requestTimeoutMs
+        )
+        session.sendTransaction(
+            magic = magic,
+            requestBody = requestBody,
+            timeoutMs = requestTimeoutMs
+        )
+    }
+
+    private fun createControlInboundJob(session: XrControlSession): Job {
+        return clientScope.launch {
+            session.inboundMessages.collect { inbound ->
+                when (inbound) {
+                    is XrControlInboundMessage.KeyStateChangeRaw -> {
+                        val event = try {
+                            XrControlInboundParser.parseKeyStateChange(inbound.payload)
+                        } catch (_: Throwable) {
+                            XrControlEvent.UnknownMessage(
+                                magic = XrControlMagic.KEY_STATE_CHANGE,
+                                transactionId = null,
+                                payload = inbound.payload
+                            )
                         }
-                        break
+                        _advancedControlEvents.tryEmit(event)
                     }
-                    val readNanos = System.nanoTime()
-                    pending += payload
-                    while (pending.size >= frameSizeBytes && frames.size < frameCount) {
-                        if (syncMarker.size >= 2) {
-                            val syncIndex = findSyncIndex(pending, syncMarker)
-                            if (syncIndex < 0) {
-                                pending = trimPendingTail(pending, frameSizeBytes - 1)
-                                break
-                            }
-                            if (syncIndex > 0) {
-                                pending = pending.copyOfRange(syncIndex, pending.size)
-                                if (pending.size < frameSizeBytes) {
-                                    break
-                                }
-                            }
-                        }
-                        val framePayload = pending.copyOfRange(0, frameSizeBytes)
-                        frames += StreamFrameDecoder.decode(
-                            index = frames.size,
-                            payload = framePayload,
-                            captureMonotonicNanos = readNanos
+
+                    is XrControlInboundMessage.Unknown -> {
+                        _advancedControlEvents.tryEmit(
+                            XrControlEvent.UnknownMessage(
+                                magic = inbound.magic,
+                                transactionId = inbound.transactionId,
+                                payload = inbound.payload
+                            )
                         )
-                        pending = pending.copyOfRange(frameSizeBytes, pending.size)
                     }
                 }
-                val captureEndNanos = System.nanoTime()
-                val success = frames.isNotEmpty()
-                val rateEstimate = StreamRateEstimator.estimate(
-                    frames = frames,
-                    captureStartNanos = captureStartNanos,
-                    captureEndNanos = captureEndNanos
-                )
-                StreamReadResult(
-                    success = success,
-                    networkHandle = selected.network.networkHandle,
-                    interfaceName = selected.interfaceName,
-                    localSocket = localSocket,
-                    remoteSocket = remoteSocket,
-                    connectMs = connectMs,
-                    frames = frames,
-                    rateEstimate = rateEstimate,
-                    readStatus = readStatus,
-                    error = if (success) null else "No frames read ($readStatus)"
-                )
             }
-        } catch (t: Throwable) {
-            val connectMs = (System.nanoTime() - startNanos) / 1_000_000
-            StreamReadResult(
-                success = false,
-                networkHandle = selected.network.networkHandle,
-                interfaceName = selected.interfaceName,
-                localSocket = null,
-                remoteSocket = "${endpoint.host}:${endpoint.streamPort}",
-                connectMs = connectMs,
-                frames = emptyList(),
-                rateEstimate = null,
-                readStatus = "connect-failed",
-                error = "${t.javaClass.simpleName}:${t.message ?: "no-message"}"
-            )
         }
     }
 
     @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
-    suspend fun captureStreamBytes(
-        durationSeconds: Int = 45,
-        maxCaptureBytes: Int = 5 * 1024 * 1024,
-        connectTimeoutMs: Int = 1500,
-        readTimeoutMs: Int = 700,
-        readChunkBytes: Int = 4096
-    ): StreamCaptureResult = withContext(Dispatchers.IO) {
-        if (durationSeconds <= 0) {
-            return@withContext StreamCaptureResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                durationMs = 0,
-                totalBytes = 0,
-                payload = ByteArray(0),
-                readStatus = "not-run",
-                error = "durationSeconds must be > 0"
+    private suspend fun getOrCreateControlSession(
+        connectTimeoutMs: Int,
+        requestTimeoutMs: Long
+    ): XrControlSession = withContext(Dispatchers.IO) {
+        if (connectTimeoutMs <= 0) {
+            throw XrControlProtocolException(
+                code = XrControlProtocolErrorCode.INVALID_ARGUMENT,
+                message = "Control connect timeout must be > 0"
             )
         }
-        if (maxCaptureBytes <= 0) {
-            return@withContext StreamCaptureResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                durationMs = 0,
-                totalBytes = 0,
-                payload = ByteArray(0),
-                readStatus = "not-run",
-                error = "maxCaptureBytes must be > 0"
+        if (requestTimeoutMs <= 0L) {
+            throw XrControlProtocolException(
+                code = XrControlProtocolErrorCode.INVALID_ARGUMENT,
+                message = "Control request timeout must be > 0"
             )
         }
-        if (readChunkBytes <= 0) {
-            return@withContext StreamCaptureResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                durationMs = 0,
-                totalBytes = 0,
-                payload = ByteArray(0),
-                readStatus = "not-run",
-                error = "readChunkBytes must be > 0"
-            )
+
+        val staleEventJob = runtimeMutex.withLock {
+            val existing = activeControlSession
+            if (existing != null && !existing.isClosed()) {
+                return@withContext existing
+            }
+            activeControlSession = null
+            val stale = activeControlEventJob
+            activeControlEventJob = null
+            stale
         }
+        staleEventJob?.cancel()
 
         val candidates = networkCandidatesForHost(endpoint.host)
         val selected = preferredNetwork(endpoint.host, candidates)
-        if (selected == null) {
-            return@withContext StreamCaptureResult(
-                success = false,
-                networkHandle = null,
-                interfaceName = null,
-                localSocket = null,
-                remoteSocket = null,
-                connectMs = 0,
-                durationMs = 0,
-                totalBytes = 0,
-                payload = ByteArray(0),
-                readStatus = "not-run",
-                error = "No matching Android Network candidate for host ${endpoint.host}"
+            ?: throw XrControlProtocolException(
+                code = XrControlProtocolErrorCode.NETWORK_UNAVAILABLE,
+                message = "No matching Android Network candidate for host ${endpoint.host}"
             )
-        }
 
         val startNanos = System.nanoTime()
-        return@withContext try {
-            selected.network.socketFactory.createSocket().use { socket ->
-                socket.soTimeout = readTimeoutMs
-                socket.connect(java.net.InetSocketAddress(endpoint.host, endpoint.streamPort), connectTimeoutMs)
-                val connectMs = (System.nanoTime() - startNanos) / 1_000_000
-                val localSocket = "${socket.localAddress.hostAddress}:${socket.localPort}"
-                val remoteSocket = "${socket.inetAddress.hostAddress}:${socket.port}"
-                val captureStartNanos = System.nanoTime()
-                val captureDeadlineNanos = captureStartNanos + durationSeconds.toLong() * 1_000_000_000L
-                val buffer = ByteArray(readChunkBytes)
-                val output = ByteArrayOutputStream(maxCaptureBytes.coerceAtMost(262_144))
-                var readStatus = "completed"
-
-                while (currentCoroutineContext().isActive) {
-                    if (System.nanoTime() >= captureDeadlineNanos) {
-                        readStatus = "duration-reached"
-                        break
-                    }
-                    if (output.size() >= maxCaptureBytes) {
-                        readStatus = "max-bytes-reached"
-                        break
-                    }
-
-                    val readCount = try {
-                        socket.getInputStream().read(buffer)
-                    } catch (_: SocketTimeoutException) {
-                        continue
-                    }
-
-                    if (readCount <= 0) {
-                        readStatus = "eof"
-                        break
-                    }
-
-                    val remaining = maxCaptureBytes - output.size()
-                    if (remaining <= 0) {
-                        readStatus = "max-bytes-reached"
-                        break
-                    }
-                    val bytesToWrite = readCount.coerceAtMost(remaining)
-                    output.write(buffer, 0, bytesToWrite)
-                    if (bytesToWrite < readCount) {
-                        readStatus = "max-bytes-reached"
-                        break
-                    }
-                }
-
-                val durationMs = (System.nanoTime() - captureStartNanos) / 1_000_000
-                val payload = output.toByteArray()
-                val success = payload.isNotEmpty()
-                StreamCaptureResult(
-                    success = success,
-                    networkHandle = selected.network.networkHandle,
-                    interfaceName = selected.interfaceName,
-                    localSocket = localSocket,
-                    remoteSocket = remoteSocket,
-                    connectMs = connectMs,
-                    durationMs = durationMs,
-                    totalBytes = payload.size,
-                    payload = payload,
-                    readStatus = readStatus,
-                    error = if (success) null else "No bytes captured ($readStatus)"
+        val socket = try {
+            selected.network.socketFactory.createSocket().apply {
+                soTimeout = 0
+                connect(
+                    java.net.InetSocketAddress(endpoint.host, endpoint.controlPort),
+                    connectTimeoutMs
                 )
             }
         } catch (t: Throwable) {
-            val connectMs = (System.nanoTime() - startNanos) / 1_000_000
-            StreamCaptureResult(
-                success = false,
-                networkHandle = selected.network.networkHandle,
-                interfaceName = selected.interfaceName,
-                localSocket = null,
-                remoteSocket = "${endpoint.host}:${endpoint.streamPort}",
-                connectMs = connectMs,
-                durationMs = 0,
-                totalBytes = 0,
-                payload = ByteArray(0),
-                readStatus = "connect-failed",
-                error = "${t.javaClass.simpleName}:${t.message ?: "no-message"}"
+            throw XrControlProtocolException(
+                code = XrControlProtocolErrorCode.CONNECTION_FAILED,
+                message = "Control connection failed for ${endpoint.host}:${endpoint.controlPort}",
+                cause = t
             )
+        }
+
+        val info = XrControlSessionInfo(
+            networkHandle = selected.network.networkHandle,
+            interfaceName = selected.interfaceName,
+            localSocket = "${socket.localAddress.hostAddress}:${socket.localPort}",
+            remoteSocket = "${socket.inetAddress.hostAddress}:${socket.port}",
+            connectMs = (System.nanoTime() - startNanos) / 1_000_000
+        )
+        val session = XrControlSession.open(
+            socket = socket,
+            info = info,
+            defaultRequestTimeoutMs = requestTimeoutMs
+        )
+        val sessionInboundJob = createControlInboundJob(session)
+
+        return@withContext runtimeMutex.withLock {
+            val existing = activeControlSession
+            if (existing == null || existing.isClosed()) {
+                activeControlEventJob?.cancel()
+                activeControlSession = session
+                activeControlEventJob = sessionInboundJob
+                session
+            } else {
+                sessionInboundJob.cancel()
+                session.close()
+                existing
+            }
         }
     }
 
@@ -725,6 +642,29 @@ class OneProXrClient(
         }
         if (config.calibrationSampleTarget <= 0) {
             emit(HeadTrackingStreamEvent.StreamError("calibrationSampleTarget must be > 0"))
+            return@flow
+        }
+
+        emit(HeadTrackingStreamEvent.BiasStateChanged(XrBiasState.LoadingConfig))
+        val trackerBiasConfig = try {
+            loadTrackerBiasConfig().also { loaded ->
+                emit(
+                    HeadTrackingStreamEvent.BiasStateChanged(
+                        XrBiasState.Active(
+                            fsn = loaded.fsn,
+                            glassesVersion = loaded.glassesVersion
+                        )
+                    )
+                )
+            }.config
+        } catch (t: Throwable) {
+            val errorState = classifyBiasActivationError(t)
+            emit(HeadTrackingStreamEvent.BiasStateChanged(errorState))
+            emit(
+                HeadTrackingStreamEvent.StreamError(
+                    "Bias activation failed code=${errorState.code} detail=${errorState.message}"
+                )
+            )
             return@flow
         }
 
@@ -748,7 +688,8 @@ class OneProXrClient(
                 complementaryFilterAlpha = config.complementaryFilterAlpha,
                 pitchScale = config.pitchScale,
                 yawScale = config.yawScale,
-                rollScale = config.rollScale
+                rollScale = config.rollScale,
+                biasConfig = trackerBiasConfig
             )
         )
 
@@ -884,7 +825,10 @@ class OneProXrClient(
                                     calibrationSampleCount = tracker.calibrationCount,
                                     calibrationTarget = tracker.calibrationTarget,
                                     isCalibrated = tracker.isCalibrated,
-                                    sourceDeviceTimeNs = report.hmdTimeNanosDevice
+                                    sourceDeviceTimeNs = report.hmdTimeNanosDevice,
+                                    factoryGyroBias = update.factoryGyroBias,
+                                    runtimeResidualGyroBias = update.runtimeResidualGyroBias,
+                                    factoryAccelBias = update.factoryAccelBias
                                 )
                             )
                         )
@@ -910,12 +854,65 @@ class OneProXrClient(
             throw cancelled
         } catch (t: Throwable) {
             emit(
+                HeadTrackingStreamEvent.BiasStateChanged(
+                    XrBiasState.Error(
+                        code = XrBiasErrorCode.RUNTIME_ERROR,
+                        message = "${t.javaClass.simpleName}:${t.message ?: "no-message"}"
+                    )
+                )
+            )
+            emit(
                 HeadTrackingStreamEvent.StreamError(
                     "${t.javaClass.simpleName}:${t.message ?: "no-message"}"
                 )
             )
         }
     }.flowOn(Dispatchers.IO)
+
+    private data class LoadedTrackerBiasConfig(
+        val fsn: String,
+        val glassesVersion: Int,
+        val config: OneProTrackerBiasConfig
+    )
+
+    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+    private suspend fun loadTrackerBiasConfig(): LoadedTrackerBiasConfig {
+        val deviceConfig = getConfig()
+        return LoadedTrackerBiasConfig(
+            fsn = deviceConfig.fsn,
+            glassesVersion = deviceConfig.glassesVersion,
+            config = OneProTrackerBiasConfig(
+                accelBias = deviceConfig.imu.accelBias.toVector3f(),
+                gyroBiasTemperatureData = deviceConfig.imu.gyroBiasTemperatureData
+            )
+        )
+    }
+
+    private fun classifyBiasActivationError(error: Throwable): XrBiasState.Error {
+        return when (error) {
+            is XrControlProtocolException -> XrBiasState.Error(
+                code = XrBiasErrorCode.TRANSPORT_ERROR,
+                message = "${error.code}:${error.message ?: "no-message"}"
+            )
+
+            is XrDeviceConfigException -> when (error.code) {
+                XrDeviceConfigErrorCode.PARSE_ERROR -> XrBiasState.Error(
+                    code = XrBiasErrorCode.PARSE_ERROR,
+                    message = error.message ?: "no-message"
+                )
+
+                XrDeviceConfigErrorCode.SCHEMA_VALIDATION_ERROR -> XrBiasState.Error(
+                    code = XrBiasErrorCode.SCHEMA_VALIDATION_ERROR,
+                    message = error.message ?: "no-message"
+                )
+            }
+
+            else -> XrBiasState.Error(
+                code = XrBiasErrorCode.RUNTIME_ERROR,
+                message = "${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+            )
+        }
+    }
 
     private fun shouldEmitCalibrationProgress(
         state: OneProCalibrationState,
@@ -928,57 +925,6 @@ class OneProXrClient(
             return true
         }
         return state.sampleCount == 1 || state.sampleCount % 10 == 0
-    }
-
-    private fun readSummary(input: InputStream, maxBytes: Int): String {
-        val payload = try {
-            readFrame(input, maxBytes)
-        } catch (_: SocketTimeoutException) {
-            return "timeout"
-        }
-        if (payload == null) {
-            return "eof"
-        }
-        return "bytes=${payload.size} hex=${payload.toHexString()}"
-    }
-
-    private fun readFrame(input: InputStream, maxFrameBytes: Int): ByteArray? {
-        val buffer = ByteArray(maxFrameBytes)
-        val read = input.read(buffer)
-        if (read <= 0) {
-            return null
-        }
-        return buffer.copyOf(read)
-    }
-
-    private fun findSyncIndex(source: ByteArray, marker: ByteArray): Int {
-        if (source.size < marker.size) {
-            return -1
-        }
-        val lastStart = source.size - marker.size
-        for (start in 0..lastStart) {
-            var matches = true
-            for (offset in marker.indices) {
-                if (source[start + offset] != marker[offset]) {
-                    matches = false
-                    break
-                }
-            }
-            if (matches) {
-                return start
-            }
-        }
-        return -1
-    }
-
-    private fun trimPendingTail(source: ByteArray, keepBytes: Int): ByteArray {
-        if (keepBytes <= 0) {
-            return ByteArray(0)
-        }
-        if (source.size <= keepBytes) {
-            return source
-        }
-        return source.copyOfRange(source.size - keepBytes, source.size)
     }
 
     private fun listInterfaces(): List<InterfaceInfo> {
@@ -1067,13 +1013,8 @@ class OneProXrClient(
         return "${octets[0]}.${octets[1]}.${octets[2]}"
     }
 
-    private fun ByteArray.toHexString(): String {
-        val builder = StringBuilder(size * 2)
-        forEach { value ->
-            val b = value.toInt() and 0xFF
-            builder.append(((b ushr 4) and 0xF).toString(16))
-            builder.append((b and 0xF).toString(16))
-        }
-        return builder.toString()
-    }
+}
+
+private fun XrVector3d.toVector3f(): Vector3f {
+    return Vector3f(x.toFloat(), y.toFloat(), z.toFloat())
 }

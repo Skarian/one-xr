@@ -33,76 +33,6 @@ data class RoutingSnapshot(
     val addressCandidates: List<AddressCandidateInfo>
 )
 
-data class ControlChannelResult(
-    val success: Boolean,
-    val networkHandle: Long?,
-    val interfaceName: String?,
-    val localSocket: String?,
-    val remoteSocket: String?,
-    val connectMs: Long,
-    val readSummary: String,
-    val error: String?
-)
-
-data class DecodedSensorFrame(
-    val index: Int,
-    val byteCount: Int,
-    val captureMonotonicNanos: Long?,
-    val rawHex: String,
-    val candidateReportId: Int?,
-    val candidateVersion: Int?,
-    val candidateTemperatureRaw: Int?,
-    val candidateTemperatureCelsius: Double?,
-    val candidateTimestampRawLe: String?,
-    val candidateWord12: Int?,
-    val candidateWord14: Long?,
-    val candidateGyroPackedX: Int?,
-    val candidateGyroPackedY: Int?,
-    val candidateGyroPackedZ: Int?,
-    val candidateTailWord30: Int?
-)
-
-data class StreamRateEstimate(
-    val frameCount: Int,
-    val captureWindowMs: Double?,
-    val observedFrameHz: Double?,
-    val receiveDeltaMinMs: Double?,
-    val receiveDeltaMaxMs: Double?,
-    val receiveDeltaAvgMs: Double?,
-    val candidateWord14DeltaMin: Long?,
-    val candidateWord14DeltaMax: Long?,
-    val candidateWord14DeltaAvg: Double?,
-    val candidateWord14HzAssumingMicros: Double?,
-    val candidateWord14HzAssumingNanos: Double?
-)
-
-data class StreamReadResult(
-    val success: Boolean,
-    val networkHandle: Long?,
-    val interfaceName: String?,
-    val localSocket: String?,
-    val remoteSocket: String?,
-    val connectMs: Long,
-    val frames: List<DecodedSensorFrame>,
-    val rateEstimate: StreamRateEstimate?,
-    val readStatus: String,
-    val error: String?
-)
-
-data class StreamCaptureResult(
-    val success: Boolean,
-    val networkHandle: Long?,
-    val interfaceName: String?,
-    val localSocket: String?,
-    val remoteSocket: String?,
-    val connectMs: Long,
-    val durationMs: Long,
-    val totalBytes: Int,
-    val payload: ByteArray,
-    val readStatus: String,
-    val error: String?
-)
-
 data class Vector3f(
     val x: Float,
     val y: Float,
@@ -159,6 +89,11 @@ data class HeadOrientationDegrees(
     val roll: Float
 )
 
+/**
+ * One emitted tracking sample from the runtime tracker path.
+ *
+ * Bias fields reflect the tracker bias terms used for this sample.
+ */
 data class HeadTrackingSample(
     val sampleIndex: Long,
     val captureMonotonicNanos: Long,
@@ -168,7 +103,10 @@ data class HeadTrackingSample(
     val calibrationSampleCount: Int,
     val calibrationTarget: Int,
     val isCalibrated: Boolean,
-    val sourceDeviceTimeNs: ULong
+    val sourceDeviceTimeNs: ULong,
+    val factoryGyroBias: Vector3f,
+    val runtimeResidualGyroBias: Vector3f,
+    val factoryAccelBias: Vector3f
 )
 
 data class HeadTrackingStreamDiagnostics(
@@ -228,6 +166,34 @@ sealed interface XrSessionState {
     data object Stopped : XrSessionState
 }
 
+enum class XrBiasErrorCode {
+    TRANSPORT_ERROR,
+    PARSE_ERROR,
+    SCHEMA_VALIDATION_ERROR,
+    RUNTIME_ERROR
+}
+
+/**
+ * Bias activation status for tracker correction.
+ *
+ * `Active` means factory config bias is loaded and runtime residual calibration can proceed.
+ */
+sealed interface XrBiasState {
+    data object Inactive : XrBiasState
+
+    data object LoadingConfig : XrBiasState
+
+    data class Active(
+        val fsn: String,
+        val glassesVersion: Int
+    ) : XrBiasState
+
+    data class Error(
+        val code: XrBiasErrorCode,
+        val message: String
+    ) : XrBiasState
+}
+
 enum class XrSensorUpdateSource {
     IMU,
     MAG
@@ -263,6 +229,7 @@ data class XrSensorSnapshot(
     val lastUpdatedSource: XrSensorUpdateSource
 )
 
+/** Current pose output plus the bias terms applied for this update. */
 data class XrPoseSnapshot(
     val relativeOrientation: HeadOrientationDegrees,
     val absoluteOrientation: HeadOrientationDegrees,
@@ -270,7 +237,10 @@ data class XrPoseSnapshot(
     val calibrationSampleCount: Int,
     val calibrationTarget: Int,
     val deltaTimeSeconds: Float,
-    val sourceDeviceTimeNs: ULong
+    val sourceDeviceTimeNs: ULong,
+    val factoryGyroBias: Vector3f,
+    val runtimeResidualGyroBias: Vector3f,
+    val factoryAccelBias: Vector3f
 )
 
 enum class XrSceneMode(val wireValue: Int) {
@@ -278,27 +248,59 @@ enum class XrSceneMode(val wireValue: Int) {
     ButtonsDisabled(1)
 }
 
-enum class XrInputMode(val wireValue: Int) {
+enum class XrDisplayInputMode(val wireValue: Int) {
     Regular(0),
     SideBySide(1)
 }
 
-enum class XrDisplayConfiguration(val wireValue: Int) {
-    _1920x1080_60Hz(2),
-    _1920x1080_90Hz(3),
-    _1920x1080_120Hz(4),
-    _3840x1080_60Hz(5);
+enum class XrDimmerLevel(val wireValue: Int) {
+    Lightest(0),
+    Middle(1),
+    Dimmest(2)
+}
+
+enum class XrKeyType(val wireValue: UInt) {
+    BottomSingleButton(1U),
+    FrontRockerButton(2U),
+    BackRockerButton(3U),
+    TopSingleButton(4U);
 
     companion object {
-        fun fromWireValue(value: Int): XrDisplayConfiguration? {
+        fun fromWireValue(value: UInt): XrKeyType? {
             return entries.firstOrNull { it.wireValue == value }
         }
     }
 }
 
+enum class XrKeyState(val wireValue: UInt) {
+    Down(1U),
+    Up(2U);
+
+    companion object {
+        fun fromWireValue(value: UInt): XrKeyState? {
+            return entries.firstOrNull { it.wireValue == value }
+        }
+    }
+}
+
+sealed interface XrControlEvent {
+    data class KeyStateChange(
+        val keyType: XrKeyType,
+        val keyState: XrKeyState,
+        val deviceTimeNs: Long
+    ) : XrControlEvent
+
+    data class UnknownMessage(
+        val magic: Int,
+        val transactionId: Int?,
+        val payload: ByteArray
+    ) : XrControlEvent
+}
+
 interface OneProXrAdvancedApi {
     val diagnostics: StateFlow<HeadTrackingStreamDiagnostics?>
     val reports: SharedFlow<OneProReportMessage>
+    val controlEvents: SharedFlow<XrControlEvent>
 }
 
 internal class HeadTrackingControlChannel {
@@ -338,6 +340,10 @@ internal data class HeadTrackingStreamConfig(
 )
 
 internal sealed interface HeadTrackingStreamEvent {
+    data class BiasStateChanged(
+        val state: XrBiasState
+    ) : HeadTrackingStreamEvent
+
     data class Connected(
         val networkHandle: Long,
         val interfaceName: String,

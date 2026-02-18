@@ -9,7 +9,7 @@
         android:id="@+id/titleText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="@string/title_test"
+        android:text="@string/title_sensor_demo"
         android:textAppearance="?attr/textAppearanceTitleMedium" />
 
     <EditText
@@ -58,6 +58,14 @@
             android:layout_marginStart="8dp"
             android:layout_weight="1"
             android:text="@string/action_view_logs" />
+
+        <Button
+            android:id="@+id/buttonCopyLogs"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:text="@string/action_copy_logs" />
     </LinearLayout>
 
     <LinearLayout

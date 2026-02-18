@@ -12,7 +12,7 @@ The repo includes:
 ## Start here
 
 - Android library integration guide: [`docs/android-library.md`](docs/android-library.md)
-- Demo app integration example: `app/src/main/java/io/onepro/xrprobe/MainActivity.kt`
+- Demo app integration example: `app/src/main/java/io/onepro/xrprobe/SensorDemoActivity.kt`
 - Latest demo APK download: [`Releases`](../../releases)
 
 ## Repo Structure
@@ -33,11 +33,16 @@ Entry point:
 Helpful methods:
 
 - `start() / stop()`
+- `sessionState / biasState`
 - `poseData`
 - `sensorData`
 - `zeroView() / recalibrate()`
+- `setSceneMode() / setDisplayInputMode()`
+- `setBrightness() / setDimmer()`
+- `getConfigRaw() / getConfig()`
 - `advanced.diagnostics`
 - `advanced.reports` (optional)
+- `advanced.controlEvents` (optional)
 
 For a minimal quickstart and full API behavior, use
 [`docs/android-library.md`](docs/android-library.md)
@@ -49,7 +54,7 @@ From repo root:
 ```bash
 ./gradlew :oneproxr:testDebugUnitTest :oneproxr:lintDebug :app:assembleDebug :app:lintDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n io.onepro.xrprobe/.MainActivity
+adb shell am start -n io.onepro.xrprobe/.HomeActivity
 ```
 
 ## Demo App Quick Start
@@ -70,6 +75,7 @@ adb shell am start -n io.onepro.xrprobe/.MainActivity
 - Parses full report payload parity fields (`device_id`, `hmd_time_nanos_device`, `report_type`, IMU vectors, magnetometer vectors, temperature, imu_id, frame_id)
 - Keeps raw vectors in protocol field order in `sensorData`; `poseData` uses a compatibility accel mapping to preserve baseline demo behavior
 - Uses device timestamp (`hmd_time_nanos_device`) for tracking integration with fail-fast monotonicity checks
+- Uses config-driven bias correction (`factory temp-interpolated gyro + runtime residual gyro + factory accel`) with explicit `biasState` activation/error status
 - Uses complementary-filter tracking with startup gyro calibration, zero-view, and recalibration support
 
 ## Acknowledgement and reference demo patch

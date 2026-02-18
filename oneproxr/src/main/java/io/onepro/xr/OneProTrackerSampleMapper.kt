@@ -8,7 +8,8 @@ internal object OneProTrackerSampleMapper {
             gz = report.gz,
             ax = report.az,
             ay = report.ay,
-            az = report.ax
+            az = report.ax,
+            temperatureCelsius = report.temperatureCelsius
         )
     }
 }

@@ -7,6 +7,8 @@
 - simple runtime API for app lifecycle and tracking
 - typed sensor reports (`imu` + `magnetometer`)
 - orientation output ready for rendering (`poseData`)
+- config-driven tracker bias correction (factory + runtime residual)
+- direct control API for scene/input/brightness/dimmer
 - optional diagnostics and raw report stream for advanced usage
 
 ## Requirements
@@ -153,6 +155,77 @@ lifecycleScope.launch {
 }
 ```
 
+## If you need control commands
+
+```kotlin
+lifecycleScope.launch {
+    client.setSceneMode(XrSceneMode.ButtonsEnabled)
+    client.setDisplayInputMode(XrDisplayInputMode.Regular)
+    client.setBrightness(5)
+    client.setDimmer(XrDimmerLevel.Middle)
+    Log.d("xr", "id=${client.getId()} sw=${client.getSoftwareVersion()} dsp=${client.getDspVersion()}")
+}
+
+lifecycleScope.launch {
+    client.advanced.controlEvents.collect { event ->
+        Log.d("xr", "controlEvent=$event")
+    }
+}
+```
+
+## If you need typed device config
+
+`getConfigRaw()` returns the raw JSON payload from the control channel.
+`getConfig()` parses and validates the full typed model (`XrDeviceConfig`).
+
+```kotlin
+import io.onepro.xr.XrControlProtocolException
+import io.onepro.xr.XrDeviceConfigErrorCode
+import io.onepro.xr.XrDeviceConfigException
+
+lifecycleScope.launch {
+    val status = try {
+        val config = client.getConfig()
+        Log.d("xr", "config fsn=${config.fsn} gyroBiasSamples=${config.imu.gyroBiasTemperatureData.size}")
+        "success"
+    } catch (e: XrDeviceConfigException) {
+        when (e.code) {
+            XrDeviceConfigErrorCode.PARSE_ERROR -> "parse_error"
+            XrDeviceConfigErrorCode.SCHEMA_VALIDATION_ERROR -> "schema_validation_error"
+        }
+    } catch (e: XrControlProtocolException) {
+        "transport_error"
+    }
+    Log.d("xr", "config status=$status")
+}
+```
+
+Typed config coverage includes:
+
+- display calibration + transforms
+- display distortion grids
+- RGB and SLAM camera intrinsics
+- IMU intrinsics/noise/bias fields
+- gyro temperature bias samples (`gyro_bias_temp_data`) with interpolation helper
+- magnetometer transform (`gyro_p_mag` / `gyro_q_mag`)
+
+## Bias activation status
+
+`start()` now loads and validates config before tracker activation, then applies:
+
+- `gyro_corrected = gyro_raw - factory_temp_interpolated_bias - runtime_residual_bias`
+- `accel_corrected = accel_raw - factory_accel_bias`
+
+You can observe bias activation/failure in real time:
+
+```kotlin
+lifecycleScope.launch {
+    client.biasState.collect { state ->
+        Log.d("xr", "biasState=$state")
+    }
+}
+```
+
 ## API surface
 
 Simple API (`OneProXrClient`):
@@ -161,22 +234,44 @@ Simple API (`OneProXrClient`):
 - `isXrConnected()`
 - `getConnectionInfo()`
 - `sessionState`
+- `biasState`
 - `sensorData`
 - `poseData`
 - `zeroView()`
 - `recalibrate()`
+- `setSceneMode(mode)`
+- `setDisplayInputMode(mode)`
+- `setBrightness(level)`
+- `setDimmer(level)`
+- `getId()`
+- `getSoftwareVersion()`
+- `getDspVersion()`
+- `getConfigRaw()`
+- `getConfig()`
 
 Advanced API (`client.advanced`):
 
 - `diagnostics`
 - `reports`
+- `controlEvents`
 
 ## Important behavior
 
 - `start()` succeeds only after the first valid report is parsed
+- `start()` now fails fast if tracker bias prerequisites cannot be loaded from config (`biasState=Error`)
 - tracking time integration uses device timestamp (`hmd_time_nanos_device`) with fail-fast monotonic checks
 - `sensorData` is raw protocol field order
 - `poseData` uses compatibility accel mapping to preserve baseline demo behavior
+- `getConfig()` validates schema and throws typed config errors (`parse_error` or `schema_validation_error`) for invalid payloads
+
+## Control protocol contract
+
+- control messages use a persistent TCP session on `52999`
+- wire header is `magic(2 bytes, big-endian) + length(4 bytes, big-endian)`
+- transaction payload is `transaction_id(4 bytes, high-bit set on outbound) + protobuf body`
+- responses are correlated by `(transaction_id without high bit, magic)`
+- key events are decoded as typed `XrControlEvent.KeyStateChange`
+- unmatched inbound frames are surfaced as unknown control messages for diagnostics
 
 ## Troubleshooting
 
@@ -197,4 +292,4 @@ Startup timeout
 
 ## Reference demo app
 
-See `app/src/main/java/io/onepro/xrprobe/MainActivity.kt` for a complete app integration
+See `app/src/main/java/io/onepro/xrprobe/SensorDemoActivity.kt` for a complete app integration

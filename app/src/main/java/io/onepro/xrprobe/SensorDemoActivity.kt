@@ -1,16 +1,20 @@
 package io.onepro.xrprobe
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.Bundle
 import android.view.View
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import io.onepro.xr.HeadTrackingStreamDiagnostics
 import io.onepro.xr.OneProXrClient
 import io.onepro.xr.OneProXrEndpoint
+import io.onepro.xr.XrBiasState
 import io.onepro.xr.XrPoseSnapshot
 import io.onepro.xr.XrSensorSnapshot
 import io.onepro.xr.XrSensorUpdateSource
 import io.onepro.xr.XrSessionState
-import io.onepro.xrprobe.databinding.ActivityMainBinding
+import io.onepro.xrprobe.databinding.ActivitySensorDemoBinding
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -22,14 +26,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-class MainActivity : AppCompatActivity() {
-    private lateinit var binding: ActivityMainBinding
+class SensorDemoActivity : AppCompatActivity() {
+    private lateinit var binding: ActivitySensorDemoBinding
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var startJob: Job? = null
     private var sessionStateJob: Job? = null
     private var sensorJob: Job? = null
     private var poseJob: Job? = null
+    private var biasJob: Job? = null
     private var diagnosticsJob: Job? = null
     private var logsVisible = false
     private var calibrationComplete = false
@@ -38,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private var latestDiagnostics: HeadTrackingStreamDiagnostics? = null
     private var latestSensorSnapshot: XrSensorSnapshot? = null
     private var latestPoseSnapshot: XrPoseSnapshot? = null
+    private var latestBiasState: XrBiasState = XrBiasState.Inactive
     private var lastTelemetryUpdateNanos = 0L
     private var lastImuReportLogNanos = 0L
     private var lastMagReportLogNanos = 0L
@@ -46,12 +52,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
+        binding = ActivitySensorDemoBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         binding.buttonStartTest.setOnClickListener { startTest() }
         binding.buttonStopTest.setOnClickListener { stopTest(updateStatus = true) }
         binding.buttonViewLogs.setOnClickListener { setLogsVisible(!logsVisible) }
+        binding.buttonCopyLogs.setOnClickListener { copyLogsToClipboard() }
         binding.buttonZeroView.setOnClickListener { requestZeroView() }
         binding.buttonRecalibrate.setOnClickListener { requestRecalibration() }
         binding.buttonSensitivityDown.setOnClickListener { adjustSensitivity(-0.1f) }
@@ -99,6 +106,7 @@ class MainActivity : AppCompatActivity() {
         latestDiagnostics = null
         latestSensorSnapshot = null
         latestPoseSnapshot = null
+        latestBiasState = XrBiasState.Inactive
         lastTelemetryUpdateNanos = 0L
         lastImuReportLogNanos = 0L
         lastMagReportLogNanos = 0L
@@ -148,7 +156,8 @@ class MainActivity : AppCompatActivity() {
             uiScope.launch {
                 try {
                     xrClient.stop()
-                } catch (_: Throwable) {
+                } catch (t: Throwable) {
+                    appendLog("stop error=${t.javaClass.simpleName}:${t.message ?: "no-message"}")
                 }
             }
         }
@@ -189,6 +198,16 @@ class MainActivity : AppCompatActivity() {
                 setRunningState(isSessionActive())
             }
         }
+        biasJob = uiScope.launch {
+            xrClient.biasState.collect { state ->
+                if (state == latestBiasState) {
+                    return@collect
+                }
+                latestBiasState = state
+                appendLog(formatBiasLog(state))
+                maybeRenderTelemetry()
+            }
+        }
         diagnosticsJob = uiScope.launch {
             xrClient.advanced.diagnostics.collect { diagnostics ->
                 if (diagnostics == null) {
@@ -210,6 +229,8 @@ class MainActivity : AppCompatActivity() {
         sensorJob = null
         poseJob?.cancel()
         poseJob = null
+        biasJob?.cancel()
+        biasJob = null
         diagnosticsJob?.cancel()
         diagnosticsJob = null
     }
@@ -400,7 +421,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             "magnetometer: [${mag.mx.toDisplay()}, ${mag.my.toDisplay()}, ${mag.mz.toDisplay()}]"
         }
-        binding.textTelemetry.text = listOf(gyroLine, accelLine, magLine).joinToString("\n")
+        val biasLine = "bias: ${formatBiasStatusLine(latestBiasState)}"
+        binding.textTelemetry.text = listOf(gyroLine, accelLine, magLine, biasLine).joinToString("\n")
     }
 
     private fun formatStatus(diagnostics: HeadTrackingStreamDiagnostics): String {
@@ -420,6 +442,19 @@ class MainActivity : AppCompatActivity() {
         return "diag parser parsed=${diagnostics.parsedMessageCount} imu=${diagnostics.imuReportCount} mag=${diagnostics.magnetometerReportCount} rejected=${diagnostics.rejectedMessageCount} dropped=${diagnostics.droppedByteCount} rejectBreakdown[length=${diagnostics.invalidReportLengthCount},decode=${diagnostics.decodeErrorCount},type=${diagnostics.unknownReportTypeCount}] trackingHz=${diagnostics.observedSampleRateHz.toDisplay()} rxMs[min=${diagnostics.receiveDeltaMinMs.toDisplay()},avg=${diagnostics.receiveDeltaAvgMs.toDisplay()},max=${diagnostics.receiveDeltaMaxMs.toDisplay()}]"
     }
 
+    private fun formatBiasStatusLine(state: XrBiasState): String {
+        return when (state) {
+            XrBiasState.Inactive -> "inactive"
+            XrBiasState.LoadingConfig -> "loading_config"
+            is XrBiasState.Active -> "active fsn=${state.fsn} version=${state.glassesVersion}"
+            is XrBiasState.Error -> "error code=${state.code} detail=${state.message}"
+        }
+    }
+
+    private fun formatBiasLog(state: XrBiasState): String {
+        return "[XR][BIAS] ${formatBiasStatusLine(state)}"
+    }
+
     private fun setLogsVisible(visible: Boolean) {
         logsVisible = visible
         binding.logsPanel.visibility = if (visible) View.VISIBLE else View.GONE
@@ -436,6 +471,20 @@ class MainActivity : AppCompatActivity() {
         binding.outputScroll.post {
             binding.outputScroll.fullScroll(View.FOCUS_DOWN)
         }
+    }
+
+    private fun copyLogsToClipboard() {
+        val logs = binding.textOutput.text?.toString().orEmpty()
+        if (logs.isBlank()) {
+            Toast.makeText(this, R.string.logs_empty, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: run {
+            Toast.makeText(this, R.string.clipboard_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("xr-sensor-logs", logs))
+        Toast.makeText(this, R.string.logs_copied, Toast.LENGTH_SHORT).show()
     }
 
     private fun buildEndpoint(host: String, ports: List<Int>): OneProXrEndpoint {

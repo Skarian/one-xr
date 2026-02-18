@@ -1,19 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">One Pro XR Tracking Demo</string>
-    <string name="title_test">One Pro XR Head Tracking</string>
+    <string name="title_home">One Pro XR Demo</string>
+    <string name="title_sensor_demo">Sensor Demo</string>
+    <string name="title_controls_demo">Controls Demo</string>
     <string name="hint_host">Host</string>
     <string name="hint_ports">Ports (comma separated)</string>
     <string name="default_host">169.254.2.1</string>
     <string name="default_ports">52999,52998</string>
+    <string name="action_open_sensor_demo">Sensor Demo</string>
+    <string name="action_open_controls_demo">Controls Demo</string>
     <string name="action_start_test">Start</string>
     <string name="action_stop">Stop</string>
+    <string name="action_connect_control">Start</string>
+    <string name="action_clear_logs">Clear Logs</string>
+    <string name="action_copy_logs">Copy Logs</string>
     <string name="action_view_logs">View Logs</string>
     <string name="action_hide_logs">Hide Logs</string>
+    <string name="action_get_id">Get ID</string>
+    <string name="action_get_software_version">Get SW Version</string>
+    <string name="action_get_dsp_version">Get DSP Version</string>
+    <string name="action_get_config_raw">Get Config Raw</string>
+    <string name="action_get_config">Get Config (Parsed)</string>
+    <string name="action_scene_buttons_enabled">Buttons Enabled</string>
+    <string name="action_scene_buttons_disabled">Buttons Disabled</string>
+    <string name="action_input_regular">Regular</string>
+    <string name="action_input_side_by_side">Side-By-Side</string>
+    <string name="action_set_brightness">Set Brightness</string>
+    <string name="action_dimmer_lightest">Dimmer Lightest</string>
+    <string name="action_dimmer_middle">Dimmer Middle</string>
+    <string name="action_dimmer_dimmest">Dimmer Dimmest</string>
     <string name="action_zero_view">Zero View</string>
     <string name="action_recalibrate">Recalibrate</string>
     <string name="action_sensitivity_down">Sens -</string>
     <string name="action_sensitivity_up">Sens +</string>
+    <string name="controls_section_queries">Queries</string>
+    <string name="controls_section_scene">Scene Mode</string>
+    <string name="controls_section_input">Display Input Mode</string>
+    <string name="controls_section_brightness">Brightness and Dimmer</string>
+    <string name="hint_brightness">Brightness 0-9</string>
+    <string name="default_brightness">5</string>
     <string name="sensitivity_value">Sensitivity %.1f</string>
     <string name="output_label">Runtime Logs</string>
     <string name="status_idle">Idle</string>
@@ -25,5 +51,12 @@
     <string name="status_streaming">Tracking samples=%1$d hz=%2$s rxAvgMs=%3$s dropped=%4$d rejected=%5$d imu=%6$d mag=%7$d</string>
     <string name="status_stream_stopped">Stream stopped: %1$s</string>
     <string name="status_stream_error">Stream error: %1$s</string>
+    <string name="controls_status_idle">Idle</string>
+    <string name="controls_status_connecting">Connecting control channel...</string>
+    <string name="controls_status_connected">Controls ready</string>
+    <string name="controls_status_error">Control error: %1$s</string>
+    <string name="logs_copied">Logs copied</string>
+    <string name="logs_empty">No logs to copy</string>
+    <string name="clipboard_unavailable">Clipboard unavailable</string>
     <string name="telemetry_placeholder">Telemetry unavailable (start stream to view IMU/MAG/report details)</string>
 </resources>

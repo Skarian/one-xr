@@ -32,5 +32,6 @@ class OneProTrackerSampleMapperTest {
         assertEquals(23.0f, sample.ax, 0.0001f)
         assertEquals(22.0f, sample.ay, 0.0001f)
         assertEquals(21.0f, sample.az, 0.0001f)
+        assertEquals(30.0f, sample.temperatureCelsius, 0.0001f)
     }
 }
