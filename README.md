@@ -21,7 +21,8 @@ The repo includes:
 - `app/`: Android demo app (`io.onepro.imuprobe`)
 - `references/`: inspiration and compatibility assets based on
   [`One-Pro-IMU-Retriever-Demo`](https://github.com/SamiMitwalli/One-Pro-IMU-Retriever-Demo)
-  (submodule, patch, scripts)
+  and [`xreal_one_driver`](https://github.com/rohitsangwan01/xreal_one_driver)
+  (submodules, patch, scripts)
 
 ## Library API at a glance
 
@@ -73,6 +74,11 @@ adb shell am start -n io.onepro.imuprobe/.MainActivity
 This project was heavily inspired by
 [One-Pro-IMU-Retriever-Demo](https://github.com/SamiMitwalli/One-Pro-IMU-Retriever-Demo)
 by Daniel Sami Mitwalli. Huge thanks to him for publishing that work.
+
+Additional thanks to
+[xreal_one_driver](https://github.com/rohitsangwan01/xreal_one_driver)
+for publishing a clean open-source One Pro driver implementation used for
+cross-checking parser behavior.
 
 On my hardware/firmware combination, I ran into parser compatibility issues
 with the upstream demo as-is. For reproducibility, this repo includes the

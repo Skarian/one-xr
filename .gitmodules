@@ -1,3 +1,9 @@
 [submodule "references/One-Pro-IMU-Retriever-Demo"]
 	path = references/One-Pro-IMU-Retriever-Demo
 	url = https://github.com/SamiMitwalli/One-Pro-IMU-Retriever-Demo.git
+[submodule "references/xreal_one_driver"]
+	path = references/xreal_one_driver
+	url = https://github.com/rohitsangwan01/xreal_one_driver.git
+[submodule "references/xr-tools"]
+	path = references/xr-tools
+	url = https://github.com/0xcaff/xr-tools.git
