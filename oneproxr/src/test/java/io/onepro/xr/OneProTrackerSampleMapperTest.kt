@@ -34,4 +34,45 @@ class OneProTrackerSampleMapperTest {
         assertEquals(21.0f, sample.az, 0.0001f)
         assertEquals(30.0f, sample.temperatureCelsius, 0.0001f)
     }
+
+    @Test
+    fun remapAccelBiasToTrackerFrameUsesLegacyAxisOrder() {
+        val remapped = OneProTrackerSampleMapper.remapAccelBiasToTrackerFrame(
+            Vector3f(
+                x = 1.0f,
+                y = 2.0f,
+                z = 3.0f
+            )
+        )
+
+        assertEquals(3.0f, remapped.x, 0.0001f)
+        assertEquals(2.0f, remapped.y, 0.0001f)
+        assertEquals(1.0f, remapped.z, 0.0001f)
+    }
+
+    @Test
+    fun remappedBiasSubtractionMatchesRawFrameThenRemapSemantics() {
+        val rawAccel = Vector3f(x = 5.0f, y = 3.0f, z = 1.0f)
+        val rawBias = Vector3f(x = 0.5f, y = 0.25f, z = -0.75f)
+
+        val mappedRaw = OneProTrackerSampleMapper.remapAccelBiasToTrackerFrame(rawAccel)
+        val mappedBias = OneProTrackerSampleMapper.remapAccelBiasToTrackerFrame(rawBias)
+
+        val correctedViaMappedSubtraction = Vector3f(
+            x = mappedRaw.x - mappedBias.x,
+            y = mappedRaw.y - mappedBias.y,
+            z = mappedRaw.z - mappedBias.z
+        )
+        val correctedRawThenMapped = OneProTrackerSampleMapper.remapAccelBiasToTrackerFrame(
+            Vector3f(
+                x = rawAccel.x - rawBias.x,
+                y = rawAccel.y - rawBias.y,
+                z = rawAccel.z - rawBias.z
+            )
+        )
+
+        assertEquals(correctedRawThenMapped.x, correctedViaMappedSubtraction.x, 0.0001f)
+        assertEquals(correctedRawThenMapped.y, correctedViaMappedSubtraction.y, 0.0001f)
+        assertEquals(correctedRawThenMapped.z, correctedViaMappedSubtraction.z, 0.0001f)
+    }
 }

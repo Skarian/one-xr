@@ -882,7 +882,9 @@ class OneProXrClient(
             fsn = deviceConfig.fsn,
             glassesVersion = deviceConfig.glassesVersion,
             config = OneProTrackerBiasConfig(
-                accelBias = deviceConfig.imu.accelBias.toVector3f(),
+                accelBias = OneProTrackerSampleMapper.remapAccelBiasToTrackerFrame(
+                    deviceConfig.imu.accelBias.toVector3f()
+                ),
                 gyroBiasTemperatureData = deviceConfig.imu.gyroBiasTemperatureData
             )
         )

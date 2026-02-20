@@ -73,7 +73,7 @@ adb shell am start -n io.onepro.xrprobe/.HomeActivity
 - Uses Android `Network.socketFactory` for reliable link-local routing
 - Uses One Pro report framing (`magic + big-endian length`) with dual-header compatibility (`2836` and `2736`)
 - Parses full report payload parity fields (`device_id`, `hmd_time_nanos_device`, `report_type`, IMU vectors, magnetometer vectors, temperature, imu_id, frame_id)
-- Keeps raw vectors in protocol field order in `sensorData`; `poseData` uses a compatibility accel mapping to preserve baseline demo behavior
+- Keeps raw vectors in protocol field order in `sensorData`; `poseData` uses a compatibility accel mapping to preserve baseline demo behavior, with factory accel bias remapped equivalently so correction matches raw-frame subtraction before remap
 - Uses device timestamp (`hmd_time_nanos_device`) for tracking integration with fail-fast monotonicity checks
 - Uses config-driven bias correction (`factory temp-interpolated gyro + runtime residual gyro + factory accel`) with explicit `biasState` activation/error status
 - Uses complementary-filter tracking with startup gyro calibration, zero-view, and recalibration support

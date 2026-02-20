@@ -215,6 +215,7 @@ Typed config coverage includes:
 
 - `gyro_corrected = gyro_raw - factory_temp_interpolated_bias - runtime_residual_bias`
 - `accel_corrected = accel_raw - factory_accel_bias`
+- In the `poseData` path, the compatibility accel axis remap and factory accel bias remap are applied consistently, so correction is equivalent to raw-frame subtraction before remap
 
 You can observe bias activation/failure in real time:
 
@@ -261,7 +262,7 @@ Advanced API (`client.advanced`):
 - `start()` now fails fast if tracker bias prerequisites cannot be loaded from config (`biasState=Error`)
 - tracking time integration uses device timestamp (`hmd_time_nanos_device`) with fail-fast monotonic checks
 - `sensorData` is raw protocol field order
-- `poseData` uses compatibility accel mapping to preserve baseline demo behavior
+- `poseData` uses compatibility accel mapping to preserve baseline demo behavior, with factory accel bias remapped consistently so correction remains raw-frame equivalent
 - `getConfig()` validates schema and throws typed config errors (`parse_error` or `schema_validation_error`) for invalid payloads
 
 ## Control protocol contract

@@ -208,6 +208,89 @@ class OneProHeadTrackerTest {
         assertEquals(0.0f, update!!.absoluteOrientation.pitch, 0.0001f)
     }
 
+    @Test
+    fun remappedFactoryAccelBiasMatchesRawFrameCorrectThenRemapSemantics() {
+        val rawFactoryBias = Vector3f(
+            x = 0.5f,
+            y = 0.25f,
+            z = -0.75f
+        )
+        val remappedFactoryBias = OneProTrackerSampleMapper.remapAccelBiasToTrackerFrame(rawFactoryBias)
+        val trackerWithFactoryBias = createTracker(
+            calibrationSampleTarget = 1,
+            complementaryFilterAlpha = 0.0f,
+            biasConfig = OneProTrackerBiasConfig(
+                accelBias = remappedFactoryBias,
+                gyroBiasTemperatureData = listOf(
+                    XrGyroBiasSample(
+                        bias = XrVector3d(0.0, 0.0, 0.0),
+                        temperatureCelsius = 20.0
+                    )
+                )
+            )
+        )
+        val referenceTracker = createTracker(
+            calibrationSampleTarget = 1,
+            complementaryFilterAlpha = 0.0f,
+            biasConfig = OneProTrackerBiasConfig(
+                accelBias = Vector3f(0.0f, 0.0f, 0.0f),
+                gyroBiasTemperatureData = listOf(
+                    XrGyroBiasSample(
+                        bias = XrVector3d(0.0, 0.0, 0.0),
+                        temperatureCelsius = 20.0
+                    )
+                )
+            )
+        )
+
+        trackerWithFactoryBias.calibrateGyroscope(sample(temperatureCelsius = 20.0f))
+        referenceTracker.calibrateGyroscope(sample(temperatureCelsius = 20.0f))
+
+        val mappedRawSample = sample(
+            ax = 5.0f,
+            ay = 3.0f,
+            az = 1.0f,
+            temperatureCelsius = 20.0f
+        )
+        val mappedSampleAfterRawFrameCorrection = sample(
+            ax = mappedRawSample.ax - remappedFactoryBias.x,
+            ay = mappedRawSample.ay - remappedFactoryBias.y,
+            az = mappedRawSample.az - remappedFactoryBias.z,
+            temperatureCelsius = 20.0f
+        )
+
+        trackerWithFactoryBias.update(
+            sensorSample = mappedRawSample,
+            deviceTimestampNanos = 1_000_000_000UL
+        )
+        referenceTracker.update(
+            sensorSample = mappedSampleAfterRawFrameCorrection,
+            deviceTimestampNanos = 1_000_000_000UL
+        )
+
+        val updateWithFactoryBias = trackerWithFactoryBias.update(
+            sensorSample = mappedRawSample,
+            deviceTimestampNanos = 1_100_000_000UL
+        )
+        val referenceUpdate = referenceTracker.update(
+            sensorSample = mappedSampleAfterRawFrameCorrection,
+            deviceTimestampNanos = 1_100_000_000UL
+        )
+
+        assertTrue(updateWithFactoryBias != null)
+        assertTrue(referenceUpdate != null)
+        assertEquals(
+            referenceUpdate!!.absoluteOrientation.pitch,
+            updateWithFactoryBias!!.absoluteOrientation.pitch,
+            0.0001f
+        )
+        assertEquals(
+            referenceUpdate.absoluteOrientation.roll,
+            updateWithFactoryBias.absoluteOrientation.roll,
+            0.0001f
+        )
+    }
+
     private fun createTracker(
         calibrationSampleTarget: Int,
         complementaryFilterAlpha: Float,
