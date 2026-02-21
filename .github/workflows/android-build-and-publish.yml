@@ -97,6 +97,41 @@ jobs:
         run: |
           cp release-assets/app-debug.apk release-assets/one-xr-demo-latest.apk
 
+      - name: Remove legacy latest APK assets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const legacyAssetNames = [
+              'one-pro-imu-demo-latest.apk',
+            ];
+
+            let release;
+            try {
+              release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: 'latest',
+              });
+            } catch (error) {
+              if (error.status === 404) {
+                core.info('No existing latest release found; skipping legacy asset cleanup.');
+                return;
+              }
+              throw error;
+            }
+
+            for (const asset of release.data.assets ?? []) {
+              if (!legacyAssetNames.includes(asset.name)) {
+                continue;
+              }
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: asset.id,
+              });
+              core.info(`Deleted legacy asset: ${asset.name}`);
+            }
+
       - name: Publish rolling latest release
         uses: softprops/action-gh-release@v2
         with:
