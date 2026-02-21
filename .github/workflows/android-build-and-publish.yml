@@ -27,17 +27,17 @@ jobs:
       - name: Build, test, and lint
         run: |
           ./gradlew --warning-mode all \
-            :oneproxr:testDebugUnitTest \
-            :oneproxr:lintDebug \
+            :onexr:testDebugUnitTest \
+            :onexr:lintDebug \
             :app:assembleDebug \
             :app:lintDebug \
-            :oneproxr:assembleRelease \
+            :onexr:assembleRelease \
             :app:assembleRelease
 
       - name: Upload demo APK
         uses: actions/upload-artifact@v4
         with:
-          name: one-pro-imu-demo-apk
+          name: one-xr-demo-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
@@ -69,10 +69,10 @@ jobs:
           echo "PUBLISH_VERSION=${PUBLISH_VERSION}" >> "$GITHUB_ENV"
           echo "Using publish version: ${PUBLISH_VERSION}"
 
-      - name: Publish oneproxr to GitHub Packages
+      - name: Publish onexr to GitHub Packages
         run: |
           ./gradlew \
-            :oneproxr:publishReleasePublicationToGitHubPackagesRepository \
+            :onexr:publishReleasePublicationToGitHubPackagesRepository \
             -PPUBLISH_VERSION="${PUBLISH_VERSION}" \
             -PGITHUB_PACKAGES_REPOSITORY="${GITHUB_REPOSITORY}"
         env:
@@ -90,12 +90,12 @@ jobs:
       - name: Download demo APK artifact
         uses: actions/download-artifact@v4
         with:
-          name: one-pro-imu-demo-apk
+          name: one-xr-demo-apk
           path: release-assets
 
       - name: Normalize APK asset filename
         run: |
-          cp release-assets/app-debug.apk release-assets/one-pro-imu-demo-latest.apk
+          cp release-assets/app-debug.apk release-assets/one-xr-demo-latest.apk
 
       - name: Publish rolling latest release
         uses: softprops/action-gh-release@v2
@@ -105,6 +105,6 @@ jobs:
           body: |
             Rolling latest demo APK from commit `${{ github.sha }}`.
             This release is updated on each push to `main`.
-          files: release-assets/one-pro-imu-demo-latest.apk
+          files: release-assets/one-xr-demo-latest.apk
           make_latest: true
           fail_on_unmatched_files: true

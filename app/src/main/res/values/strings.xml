@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">One Pro XR Tracking Demo</string>
-    <string name="title_home">One Pro XR Demo</string>
+    <string name="app_name">One XR Tracking Demo</string>
+    <string name="title_home">One XR Demo</string>
     <string name="title_sensor_demo">Sensor Demo</string>
     <string name="title_controls_demo">Controls Demo</string>
     <string name="hint_host">Host</string>

@@ -1,59 +1,78 @@
-# Android Library Guide (`oneproxr`)
+# Android Library Guide (`onexr`)
 
-`oneproxr` gives Android apps direct access to XREAL One Pro tracking data without the Unity-based XREAL SDK
+`onexr` is the Android library module that powers this repository.
 
-## What you get
+It exposes a coroutine-first API for:
 
-- simple runtime API for app lifecycle and tracking
-- typed sensor reports (`imu` + `magnetometer`)
-- physical orientation output (`poseData`) with zero-view recentering
-- config-driven tracker bias correction (factory + runtime residual)
-- direct control API for scene/input/brightness/dimmer
-- optional diagnostics and raw report stream for advanced usage
+- session lifecycle
+- real-time IMU and magnetometer snapshots
+- pose output (`absoluteOrientation` + `relativeOrientation`)
+- runtime pose mode selection (`RAW_IMU` / `SMOOTH_IMU`)
+- calibration, recenter, and control/config commands
+
+If you only need project overview, use [`README.md`](../README.md). This guide
+is the detailed integration reference.
 
 ## Requirements
 
 - Android `minSdk 26`
 - Android `compileSdk 35`
-- Kotlin/Java target 17
-- XREAL One Pro connected to phone
-- glasses set to `Follow` mode (stabilization off)
+- Kotlin/Java target `17`
+- Network path to the glasses (default link-local host `169.254.2.1`)
+- Glasses mode set to `Follow` for calibration/tracking
 
 ## Add the library
 
-### Source module
+### Option A: Source module
 
 `settings.gradle.kts`
 
 ```kotlin
-include(":app", ":oneproxr")
+include(":app", ":onexr")
 ```
 
 `app/build.gradle.kts`
 
 ```kotlin
 dependencies {
-    implementation(project(":oneproxr"))
+    implementation(project(":onexr"))
 }
 ```
 
-### Maven artifact (optional)
+### Option B: Maven artifact
 
 ```kotlin
-implementation("io.onepro:oneproxr:<version>")
+implementation("io.onexr:onexr:<version>")
 ```
 
-## Required permissions
+## Required Android permissions
 
-The library manifest is intentionally empty
-Your app must declare:
+The library manifest is intentionally empty. Your app must declare:
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 ```
 
-## Quickstart (minimal)
+`ACCESS_NETWORK_STATE` is required for connection routing and all network-backed
+operations (`start`, control commands, config fetch).
+
+## Core types and entrypoint
+
+- `OneXrClient`: main client API
+- `OneXrEndpoint`: host/control/stream endpoint config
+- `XrSessionState`: connection/calibration/streaming/error state machine
+- `XrSensorSnapshot`: latest IMU + MAG values in protocol order
+- `XrPoseSnapshot`: orientation output in degrees + bias terms used
+- `XrPoseDataMode`: `RAW_IMU` or `SMOOTH_IMU`
+
+Default endpoint:
+
+- host: `169.254.2.1`
+- control port: `52999`
+- stream port: `52998`
+
+## Minimal integration example
 
 ```kotlin
 import android.Manifest
@@ -62,38 +81,64 @@ import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import io.onepro.xr.OneProXrClient
-import io.onepro.xr.XrPoseDataMode
-import io.onepro.xr.XrPoseSnapshot
+import io.onexr.OneXrClient
+import io.onexr.OneXrEndpoint
+import io.onexr.XrPoseDataMode
+import io.onexr.XrPoseSnapshot
+import io.onexr.XrSessionState
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class TrackingActivity : AppCompatActivity() {
-    private lateinit var client: OneProXrClient
+    private lateinit var client: OneXrClient
+    private var sessionJob: Job? = null
     private var poseJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        client = OneProXrClient(applicationContext)
+        client = OneXrClient(
+            context = applicationContext,
+            endpoint = OneXrEndpoint()
+        )
     }
 
     @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
     fun startTracking() {
-        if (client.isXrConnected()) return
         lifecycleScope.launch {
             try {
-                client.start()
                 client.setPoseDataMode(XrPoseDataMode.RAW_IMU)
-                poseJob?.cancel()
-                poseJob = launch {
-                    client.poseData.collect { pose ->
-                        if (pose == null) return@collect
-                        renderPose(pose)
-                    }
-                }
+                val info = client.start()
+                Log.i("xr", "connected iface=${info.interfaceName} ms=${info.connectMs}")
+                observeClient()
             } catch (t: Throwable) {
-                Log.e("xr", "start failed: ${t.message}")
+                Log.e("xr", "start failed", t)
+            }
+        }
+    }
+
+    private fun observeClient() {
+        sessionJob?.cancel()
+        sessionJob = lifecycleScope.launch {
+            client.sessionState.collect { state ->
+                when (state) {
+                    XrSessionState.Idle -> Log.d("xr", "idle")
+                    XrSessionState.Connecting -> Log.d("xr", "connecting")
+                    is XrSessionState.Calibrating -> Log.d(
+                        "xr",
+                        "calibrating ${state.calibrationSampleCount}/${state.calibrationTarget}"
+                    )
+                    is XrSessionState.Streaming -> Log.d("xr", "streaming")
+                    is XrSessionState.Error -> Log.e("xr", "session error=${state.code}:${state.message}")
+                    XrSessionState.Stopped -> Log.d("xr", "stopped")
+                }
+            }
+        }
+
+        poseJob?.cancel()
+        poseJob = lifecycleScope.launch {
+            client.poseData.collect { pose ->
+                if (pose != null) renderPose(pose)
             }
         }
     }
@@ -107,7 +152,9 @@ class TrackingActivity : AppCompatActivity() {
     }
 
     fun stopTracking() {
+        sessionJob?.cancel()
         poseJob?.cancel()
+        sessionJob = null
         poseJob = null
         lifecycleScope.launch { client.stop() }
     }
@@ -118,33 +165,85 @@ class TrackingActivity : AppCompatActivity() {
     }
 
     private fun renderPose(pose: XrPoseSnapshot) {
-        val r = pose.relativeOrientation
-        Log.d("xr", "pitch=${r.pitch} yaw=${r.yaw} roll=${r.roll}")
+        val relative = pose.relativeOrientation
+        Log.d(
+            "xr",
+            "relative pitch=${relative.pitch} yaw=${relative.yaw} roll=${relative.roll}"
+        )
     }
 }
 ```
 
-## PoseData modes
+## Lifecycle semantics
 
-`poseData` mode is runtime-selectable:
+`start()`:
 
-- `XrPoseDataMode.RAW_IMU`: publishes tracker pose output without extra smoothing.
-- `XrPoseDataMode.SMOOTH_IMU`: applies smoothing to `relativeOrientation` only.
+- establishes stream transport
+- loads and validates config for tracker bias activation
+- enters calibration
+- returns successfully only after first valid report is parsed
 
-`absoluteOrientation` remains raw in both modes. `sensorData` is always raw.
+`stop()`:
+
+- cancels stream and control sessions
+- resets runtime state
+- sets `sessionState` to `Stopped`
+
+`isXrConnected()` returns `true` only for `Calibrating` or `Streaming` states.
+
+## Pose output and smoothing mode
+
+`poseData` emits `XrPoseSnapshot` values:
+
+- `absoluteOrientation`: world-frame tracker output (raw estimator output)
+- `relativeOrientation`: recentered orientation after `zeroView`
+
+`XrPoseDataMode` controls publishing behavior:
+
+- `RAW_IMU`: no additional smoothing
+- `SMOOTH_IMU`: smooths `relativeOrientation` only
+
+`absoluteOrientation` is not smoothed in either mode.
+
+### Switching mode at runtime
 
 ```kotlin
 client.setPoseDataMode(XrPoseDataMode.SMOOTH_IMU)
 ```
 
-## If you need raw IMU/MAG data
+- mode can be changed while streaming
+- default mode on a new `OneXrClient` is `RAW_IMU`
+- `sensorData` remains raw regardless of pose mode
+
+## Calibration, recentering, and expected operator flow
+
+Recommended run sequence:
+
+1. `start()` with glasses still
+2. wait until `sessionState` reports calibration completion/streaming
+3. call `zeroView()` facing neutral forward direction
+4. use `recalibrate()` if the user needs a fresh stillness calibration
+
+Behavior notes:
+
+- `zeroView()` recenters `relativeOrientation`; it does not modify
+  `absoluteOrientation`
+- `recalibrate()` restarts calibration progression in the stream runtime
+
+## Reading raw sensor snapshots
+
+`XrSensorSnapshot` carries latest known IMU and MAG samples plus metadata.
+Vectors stay in protocol field order.
 
 ```kotlin
 lifecycleScope.launch {
     client.sensorData.collect { snapshot ->
         if (snapshot == null) return@collect
         snapshot.imu?.let { imu ->
-            Log.d("xr", "gyro=[${imu.gx}, ${imu.gy}, ${imu.gz}] accel=[${imu.ax}, ${imu.ay}, ${imu.az}]")
+            Log.d(
+                "xr",
+                "gyro=[${imu.gx}, ${imu.gy}, ${imu.gz}] accel=[${imu.ax}, ${imu.ay}, ${imu.az}]"
+            )
         }
         snapshot.magnetometer?.let { mag ->
             Log.d("xr", "mag=[${mag.mx}, ${mag.my}, ${mag.mz}]")
@@ -153,166 +252,113 @@ lifecycleScope.launch {
 }
 ```
 
-## If you need diagnostics or raw reports
+## Bias state and correction model
+
+`biasState` is a `StateFlow<XrBiasState>` and is observable during startup and
+runtime:
+
+- `Inactive`
+- `LoadingConfig`
+- `Active(fsn, glassesVersion)`
+- `Error(code, message)`
+
+The runtime correction model is:
+
+- `gyro_corrected = gyro_raw - factory_temp_interpolated_bias - runtime_residual_bias`
+- `accel_corrected = accel_raw - factory_accel_bias`
+
+If bias prerequisites fail, startup fails fast and `sessionState` transitions to
+`Error`.
+
+## Controls and configuration APIs
+
+`OneXrClient` also exposes control/config calls:
+
+- scene mode: `setSceneMode(...)`
+- display input mode: `setDisplayInputMode(...)`
+- brightness and dimmer: `setBrightness(...)`, `setDimmer(...)`
+- identity/version reads: `getId()`, `getSoftwareVersion()`, `getDspVersion()`
+- config reads: `getConfigRaw()`, `getConfig()`
+
+These calls can be used from a control-only flow without calling `start()`.
 
 ```kotlin
-lifecycleScope.launch {
-    client.advanced.diagnostics.collect { d ->
-        if (d == null) return@collect
-        Log.d("xr", "imu=${d.imuReportCount} mag=${d.magnetometerReportCount} rejected=${d.rejectedMessageCount}")
-    }
-}
+import android.Manifest
+import androidx.annotation.RequiresPermission
+import io.onexr.OneXrClient
+import io.onexr.XrControlProtocolException
+import io.onexr.XrDeviceConfigErrorCode
+import io.onexr.XrDeviceConfigException
+import io.onexr.XrDimmerLevel
+import io.onexr.XrDisplayInputMode
+import io.onexr.XrSceneMode
 
-lifecycleScope.launch {
-    client.advanced.reports.collect { report ->
-        Log.d("xr", "reportType=${report.reportType} timeNs=${report.hmdTimeNanosDevice}")
-    }
-}
-```
-
-## If you need control commands
-
-```kotlin
-lifecycleScope.launch {
+@RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+suspend fun applyDisplaySettings(client: OneXrClient) {
     client.setSceneMode(XrSceneMode.ButtonsEnabled)
     client.setDisplayInputMode(XrDisplayInputMode.Regular)
     client.setBrightness(5)
     client.setDimmer(XrDimmerLevel.Middle)
-    Log.d("xr", "id=${client.getId()} sw=${client.getSoftwareVersion()} dsp=${client.getDspVersion()}")
 }
 
-lifecycleScope.launch {
-    client.advanced.controlEvents.collect { event ->
-        Log.d("xr", "controlEvent=$event")
-    }
-}
-```
-
-## If you need typed device config
-
-`getConfigRaw()` returns the raw JSON payload from the control channel.
-`getConfig()` parses and validates the full typed model (`XrDeviceConfig`).
-
-```kotlin
-import io.onepro.xr.XrControlProtocolException
-import io.onepro.xr.XrDeviceConfigErrorCode
-import io.onepro.xr.XrDeviceConfigException
-
-lifecycleScope.launch {
-    val status = try {
+@RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
+suspend fun readConfig(client: OneXrClient): String {
+    return try {
         val config = client.getConfig()
-        Log.d("xr", "config fsn=${config.fsn} gyroBiasSamples=${config.imu.gyroBiasTemperatureData.size}")
-        "success"
+        "config ok fsn=${config.fsn} gyroBiasSamples=${config.imu.gyroBiasTemperatureData.size}"
     } catch (e: XrDeviceConfigException) {
         when (e.code) {
-            XrDeviceConfigErrorCode.PARSE_ERROR -> "parse_error"
-            XrDeviceConfigErrorCode.SCHEMA_VALIDATION_ERROR -> "schema_validation_error"
+            XrDeviceConfigErrorCode.PARSE_ERROR -> "config parse_error"
+            XrDeviceConfigErrorCode.SCHEMA_VALIDATION_ERROR -> "config schema_validation_error"
         }
     } catch (e: XrControlProtocolException) {
-        "transport_error"
-    }
-    Log.d("xr", "config status=$status")
-}
-```
-
-Typed config coverage includes:
-
-- display calibration + transforms
-- display distortion grids
-- RGB and SLAM camera intrinsics
-- IMU intrinsics/noise/bias fields
-- gyro temperature bias samples (`gyro_bias_temp_data`) with interpolation helper
-- magnetometer transform (`gyro_p_mag` / `gyro_q_mag`)
-
-## Bias activation status
-
-`start()` now loads and validates config before tracker activation, then applies:
-
-- `gyro_corrected = gyro_raw - factory_temp_interpolated_bias - runtime_residual_bias`
-- `accel_corrected = accel_raw - factory_accel_bias`
-- In the `poseData` path, the compatibility accel axis remap and factory accel bias remap are applied consistently, so correction is equivalent to raw-frame subtraction before remap
-- Gyroscope and gyro-bias terms are treated as rad/s; pose integration converts to degrees and emits orientation in degrees
-- `relativeOrientation` is the physical recentered delta from `zeroView` (no library-applied gain)
-
-You can observe bias activation/failure in real time:
-
-```kotlin
-lifecycleScope.launch {
-    client.biasState.collect { state ->
-        Log.d("xr", "biasState=$state")
+        "control transport_error"
     }
 }
 ```
 
-## API surface
+## Advanced streams (`client.advanced`)
 
-Simple API (`OneProXrClient`):
+`OneXrAdvancedApi` exposes additional flows:
 
-- `start()` / `stop()`
-- `isXrConnected()`
-- `getConnectionInfo()`
-- `sessionState`
-- `biasState`
-- `sensorData`
-- `poseData`
-- `poseDataMode`
-- `setPoseDataMode(mode)`
-- `zeroView()`
-- `recalibrate()`
-- `setSceneMode(mode)`
-- `setDisplayInputMode(mode)`
-- `setBrightness(level)`
-- `setDimmer(level)`
-- `getId()`
-- `getSoftwareVersion()`
-- `getDspVersion()`
-- `getConfigRaw()`
-- `getConfig()`
+- `diagnostics: StateFlow<HeadTrackingStreamDiagnostics?>`
+- `reports: SharedFlow<OneXrReportMessage>`
+- `controlEvents: SharedFlow<XrControlEvent>`
 
-Advanced API (`client.advanced`):
-
-- `diagnostics`
-- `reports`
-- `controlEvents`
-
-## Important behavior
-
-- `start()` succeeds only after the first valid report is parsed
-- `start()` now fails fast if tracker bias prerequisites cannot be loaded from config (`biasState=Error`)
-- tracking time integration uses device timestamp (`hmd_time_nanos_device`) with fail-fast monotonic checks
-- `sensorData` is raw protocol field order
-- `poseData` uses compatibility accel mapping with factory accel bias remapped consistently so correction remains raw-frame equivalent
-- `poseDataMode=SMOOTH_IMU` smooths `relativeOrientation`; `absoluteOrientation` remains unsmoothed raw tracker output
-- `poseData.absoluteOrientation` and `poseData.relativeOrientation` are physical angles in degrees; relative orientation is recentered but not scaled
-- `poseData` gyroscope integration expects device `gx/gy/gz` and gyro bias terms in rad/s
-- `getConfig()` validates schema and throws typed config errors (`parse_error` or `schema_validation_error`) for invalid payloads
-
-## Control protocol contract
-
-- control messages use a persistent TCP session on `52999`
-- wire header is `magic(2 bytes, big-endian) + length(4 bytes, big-endian)`
-- transaction payload is `transaction_id(4 bytes, high-bit set on outbound) + protobuf body`
-- responses are correlated by `(transaction_id without high bit, magic)`
-- key events are decoded as typed `XrControlEvent.KeyStateChange`
-- unmatched inbound frames are surfaced as unknown control messages for diagnostics
+These are useful for telemetry, debugging, and validating parser/control behavior.
 
 ## Troubleshooting
 
 `No matching Android Network candidate for host 169.254.2.1`
 
-- call `describeRouting()`
-- verify link-local route is present
+- verify `ACCESS_NETWORK_STATE` is granted
+- call `describeRouting()` to inspect interface/network candidates
+- confirm the phone has a route to the glasses link-local host
 
-Startup timeout
+`Timed out waiting for first valid report during startup`
 
+- verify stream/control ports (defaults: `52998`/`52999`)
 - confirm glasses mode is `Follow`
-- check `advanced.diagnostics`
+- inspect `client.advanced.diagnostics`
 
-`sessionState` becomes `Error`
+`sessionState = Error(...)`
 
 - inspect `code`, `message`, `causeType`
-- call `stop()` then `start()`
+- call `stop()` and retry `start()`
 
-## Reference demo app
+`biasState = Error(...)`
 
-See `app/src/main/java/io/onepro/xrprobe/SensorDemoActivity.kt` for a complete app integration
+- run `getConfigRaw()` and `getConfig()` to inspect payload quality
+- handle `XrDeviceConfigException` (`PARSE_ERROR`, `SCHEMA_VALIDATION_ERROR`)
+
+## Demo app references
+
+- Sensor integration reference:
+  `app/src/main/java/io/onexr/demo/SensorDemoActivity.kt`
+- Control integration reference:
+  `app/src/main/java/io/onexr/demo/ControlsDemoActivity.kt`
+
+## Migration note
+
+If you are updating from earlier naming, update imports and types to current
+`io.onexr` / `OneXr*` symbols.

@@ -50,7 +50,7 @@ From controls demo runtime logs on user device/firmware:
 
 Completed on 2026-02-18:
 
-- Removed display configuration public APIs and models from `oneproxr`.
+- Removed display configuration public APIs and models from `onexr`.
 - Removed display configuration controls from `ControlsDemoActivity` and layout.
 - Removed display configuration references from README/docs and control parity tests.
 - Kept this document as the historical record for deferred re-introduction.
