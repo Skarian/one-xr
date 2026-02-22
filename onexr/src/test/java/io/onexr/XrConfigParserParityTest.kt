@@ -52,16 +52,12 @@ class XrConfigParserParityTest {
     }
 
     @Test
-    fun `parser rejects unsupported glasses version`() {
+    fun `parser accepts unvalidated glasses version`() {
         val raw = validConfigWithCameras().replace("\"glasses_version\": 8", "\"glasses_version\": 6")
 
-        try {
-            XrDeviceConfigParser.parse(raw)
-            throw AssertionError("expected schema validation error")
-        } catch (expected: XrDeviceConfigException) {
-            assertEquals(XrDeviceConfigErrorCode.SCHEMA_VALIDATION_ERROR, expected.code)
-            assertTrue(expected.message?.contains("glasses_version") == true)
-        }
+        val config = XrDeviceConfigParser.parse(raw)
+
+        assertEquals(6, config.glassesVersion)
     }
 
     @Test

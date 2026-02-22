@@ -3,12 +3,14 @@ package io.onexr
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
+import java.util.logging.Logger
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
 internal object XrDeviceConfigParser {
-    private val SUPPORTED_GLASSES_VERSIONS = setOf(7, 8)
+    private val VALIDATED_GLASSES_VERSIONS = setOf(7, 8)
+    private val logger: Logger = Logger.getLogger(XrDeviceConfigParser::class.java.name)
     private val lastModifiedTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
     fun parse(rawJson: String): XrDeviceConfig {
@@ -23,10 +25,10 @@ internal object XrDeviceConfigParser {
         }
 
         val glassesVersion = root.requireInt("glasses_version", "$")
-        if (glassesVersion !in SUPPORTED_GLASSES_VERSIONS) {
-            throw schemaError(
-                path = "$.glasses_version",
-                detail = "must be one of ${SUPPORTED_GLASSES_VERSIONS.sorted()} but was $glassesVersion"
+        if (glassesVersion !in VALIDATED_GLASSES_VERSIONS) {
+            logger.warning(
+                "Unvalidated glasses_version $glassesVersion encountered; " +
+                    "continuing parse with schema checks for remaining fields"
             )
         }
 
