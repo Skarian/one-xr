@@ -281,6 +281,8 @@ If bias prerequisites fail, startup fails fast and `sessionState` transitions to
 - config reads: `getConfigRaw()`, `getConfig()`
 
 These calls can be used from a control-only flow without calling `start()`.
+`getConfig()` accepts config payloads with `glasses_version` `7` or `8`;
+other values fail with `XrDeviceConfigErrorCode.SCHEMA_VALIDATION_ERROR`.
 
 ```kotlin
 import android.Manifest

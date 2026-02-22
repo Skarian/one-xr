@@ -8,7 +8,7 @@ import org.json.JSONException
 import org.json.JSONObject
 
 internal object XrDeviceConfigParser {
-    private const val EXPECTED_GLASSES_VERSION = 8
+    private val SUPPORTED_GLASSES_VERSIONS = setOf(7, 8)
     private val lastModifiedTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
     fun parse(rawJson: String): XrDeviceConfig {
@@ -23,10 +23,10 @@ internal object XrDeviceConfigParser {
         }
 
         val glassesVersion = root.requireInt("glasses_version", "$")
-        if (glassesVersion != EXPECTED_GLASSES_VERSION) {
+        if (glassesVersion !in SUPPORTED_GLASSES_VERSIONS) {
             throw schemaError(
                 path = "$.glasses_version",
-                detail = "must be $EXPECTED_GLASSES_VERSION but was $glassesVersion"
+                detail = "must be one of ${SUPPORTED_GLASSES_VERSIONS.sorted()} but was $glassesVersion"
             )
         }
 

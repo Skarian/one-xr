@@ -33,6 +33,15 @@ class XrConfigParserParityTest {
     }
 
     @Test
+    fun `parser accepts glasses version 7`() {
+        val raw = validConfigWithCameras().replace("\"glasses_version\": 8", "\"glasses_version\": 7")
+
+        val config = XrDeviceConfigParser.parse(raw)
+
+        assertEquals(7, config.glassesVersion)
+    }
+
+    @Test
     fun `parser rejects malformed json`() {
         try {
             XrDeviceConfigParser.parse("{")
@@ -44,7 +53,7 @@ class XrConfigParserParityTest {
 
     @Test
     fun `parser rejects unsupported glasses version`() {
-        val raw = validConfigWithCameras().replace("\"glasses_version\": 8", "\"glasses_version\": 7")
+        val raw = validConfigWithCameras().replace("\"glasses_version\": 8", "\"glasses_version\": 6")
 
         try {
             XrDeviceConfigParser.parse(raw)
